@@ -1,0 +1,19 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+
+# Build output
+app/build/
+app/.svelte-kit/
+app/src-tauri/target/
+app/src-tauri/gen/schemas/
+
+# Bundles / release artifacts (attach to GitHub Releases instead)
+*.dmg
+*.app/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example

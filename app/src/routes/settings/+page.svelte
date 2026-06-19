@@ -1,14 +1,13 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, Cpu, RefreshCw } from "lucide-svelte";
   import {
     loadApiKey, saveApiKey, loadPrompt, savePrompt,
     loadDiagramPrompt, saveDiagramPrompt, loadModel, saveModel,
   } from "$lib/settings";
   import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT, DEFAULT_MODEL, MODELS, type ModelId } from "$lib/gemini";
-  import { checkForUpdate } from "$lib/updates";
+  import { checkForUpdate, installUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
 
   let apiKey = $state("");
@@ -33,11 +32,14 @@
     try {
       const info = await checkForUpdate();
       if (info) {
-        toast.success(`Clarity v${info.version} is available.`);
-        await openUrl(info.htmlUrl);
+        toast.success(`Clarity v${info.version} found — installing…`);
+        await installUpdate(info);
+        // On success the app downloads, installs, and relaunches itself.
       } else {
         toast.info("You're on the latest version.");
       }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
     } finally {
       checking = false;
     }
@@ -137,7 +139,7 @@
       <RefreshCw size={14} /> {checking ? "Checking…" : "Check for updates"}
     </button>
   </div>
-  <p class="hint">Checks GitHub for new releases. Updates are installed manually by downloading the latest build.</p>
+  <p class="hint">Checks GitHub for new signed releases. If one is found, it's downloaded, verified, installed, and the app restarts automatically.</p>
 </section>
 
 <style>

@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/stores";
-  import { openUrl } from "@tauri-apps/plugin-opener";
   import { Library, Plus, Settings, Moon, Sun, Video, Download, X } from "lucide-svelte";
   import { theme, toggleTheme, initTheme } from "$lib/theme";
-  import { checkForUpdate, isVersionDismissed, dismissVersion, type UpdateInfo } from "$lib/updates";
+  import { checkForUpdate, installUpdate, isVersionDismissed, dismissVersion, type UpdateInfo } from "$lib/updates";
+  import { toast } from "$lib/toast";
   import Toaster from "$lib/Toaster.svelte";
 
   let { children } = $props();
@@ -17,9 +17,26 @@
 
   let update = $state<UpdateInfo | null>(null);
   let collapsed = $state(true);
+  let installing = $state(false);
+  let progressPct = $state<number | null>(null);
 
   function isActive(href: string, path: string): boolean {
     return href === "/" ? path === "/" : path.startsWith(href);
+  }
+
+  async function install() {
+    if (!update || installing) return;
+    installing = true;
+    try {
+      await installUpdate(update, (downloaded, total) => {
+        progressPct = total ? Math.round((downloaded / total) * 100) : null;
+      });
+      // On success the app relaunches; this line is effectively unreachable.
+    } catch (err) {
+      installing = false;
+      progressPct = null;
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function dismiss() {
@@ -38,12 +55,18 @@
 
 {#if update}
   <div class="update-bar">
-    <span>Clarity v{update.version} is available.</span>
-    <button class="update-dl" onclick={() => openUrl(update!.htmlUrl)}>
-      <Download size={14} /> Download
-    </button>
-    <code>xattr -dr com.apple.quarantine /Applications/Clarity.app</code>
-    <button class="update-x" onclick={dismiss} aria-label="Dismiss"><X size={14} /></button>
+    {#if installing}
+      <span>
+        Installing Clarity v{update.version}…{progressPct != null ? ` ${progressPct}%` : ""}
+        The app will restart automatically.
+      </span>
+    {:else}
+      <span>Clarity v{update.version} is available.</span>
+      <button class="update-dl" onclick={install}>
+        <Download size={14} /> Install &amp; Restart
+      </button>
+      <button class="update-x" onclick={dismiss} aria-label="Dismiss"><X size={14} /></button>
+    {/if}
   </div>
 {/if}
 

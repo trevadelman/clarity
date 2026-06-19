@@ -21,3 +21,7 @@ app/src-tauri/icons/ios/
 .env
 .env.*
 !.env.example
+
+# Tauri updater signing keys — NEVER commit the private key
+app/.tauri-keys/
+

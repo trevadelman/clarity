@@ -1,20 +1,19 @@
-import { getVersion } from "@tauri-apps/api/app";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { load, type Store } from "@tauri-apps/plugin-store";
 
-const REPO = "trevadelman/clarity";
-const LATEST_URL = `https://api.github.com/repos/${REPO}/releases/latest`;
 const STORE_FILE = "settings.json";
 const KEY_DISMISSED = "dismissedUpdateVersion";
 
 export interface UpdateInfo {
-  /** Latest release version, normalized without a leading "v". */
+  /** Latest available version (without a leading "v"). */
   version: string;
   /** Currently-running app version. */
   current: string;
-  /** Human-facing release page. */
-  htmlUrl: string;
-  /** Release notes body. */
+  /** Release notes body, if provided in the manifest. */
   notes: string;
+  /** The underlying Tauri update handle used to download & install. */
+  handle: Update;
 }
 
 let storePromise: Promise<Store> | null = null;
@@ -23,53 +22,53 @@ function getStore(): Promise<Store> {
   return storePromise;
 }
 
-function stripV(tag: string): string {
-  return tag.replace(/^v/i, "").trim();
-}
-
-/** Compare two dotted version strings. Returns 1 if a>b, -1 if a<b, 0 if equal. */
-export function compareVersions(a: string, b: string): number {
-  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
-  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
-  const len = Math.max(pa.length, pb.length);
-  for (let i = 0; i < len; i++) {
-    const da = pa[i] ?? 0;
-    const db = pb[i] ?? 0;
-    if (da > db) return 1;
-    if (da < db) return -1;
-  }
-  return 0;
-}
-
 /**
- * Check GitHub for a newer release. Returns update info when a strictly newer
- * version is available, otherwise null. Network/parse failures return null.
+ * Check the configured updater endpoint for a newer signed release. Returns
+ * update info when one is available, otherwise null. Network/verification
+ * failures resolve to null so the UI can fail silently.
  */
 export async function checkForUpdate(): Promise<UpdateInfo | null> {
   try {
-    const current = await getVersion();
-
-    const res = await fetch(LATEST_URL, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as {
-      tag_name?: string;
-      html_url?: string;
-      body?: string;
-    };
-    if (!data.tag_name) return null;
-    const version = stripV(data.tag_name);
-    if (compareVersions(version, current) <= 0) return null;
+    const update = await check();
+    if (!update) return null;
     return {
-      version,
-      current,
-      htmlUrl: data.html_url ?? `https://github.com/${REPO}/releases/latest`,
-      notes: data.body ?? "",
+      version: update.version,
+      current: update.currentVersion,
+      notes: update.body ?? "",
+      handle: update,
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Download and install the update, reporting progress, then relaunch the app
+ * into the new version. The downloaded bundle is verified against the public
+ * key baked into the app before it is applied.
+ */
+export async function installUpdate(
+  info: UpdateInfo,
+  onProgress?: (downloaded: number, total: number | null) => void
+): Promise<void> {
+  let downloaded = 0;
+  let total: number | null = null;
+  await info.handle.downloadAndInstall((event) => {
+    switch (event.event) {
+      case "Started":
+        total = event.data.contentLength ?? null;
+        onProgress?.(0, total);
+        break;
+      case "Progress":
+        downloaded += event.data.chunkLength;
+        onProgress?.(downloaded, total);
+        break;
+      case "Finished":
+        onProgress?.(total ?? downloaded, total);
+        break;
+    }
+  });
+  await relaunch();
 }
 
 export async function isVersionDismissed(version: string): Promise<boolean> {

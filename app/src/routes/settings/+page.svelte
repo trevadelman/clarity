@@ -1,21 +1,47 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { KeyRound, MessageSquareText, Save, RotateCcw, Cpu } from "lucide-svelte";
-  import { loadApiKey, saveApiKey, loadPrompt, savePrompt, loadModel, saveModel } from "$lib/settings";
-  import { DEFAULT_PROMPT, DEFAULT_MODEL, MODELS, type ModelId } from "$lib/gemini";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { openUrl } from "@tauri-apps/plugin-opener";
+  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, Cpu, RefreshCw } from "lucide-svelte";
+  import {
+    loadApiKey, saveApiKey, loadPrompt, savePrompt,
+    loadDiagramPrompt, saveDiagramPrompt, loadModel, saveModel,
+  } from "$lib/settings";
+  import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT, DEFAULT_MODEL, MODELS, type ModelId } from "$lib/gemini";
+  import { checkForUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
 
   let apiKey = $state("");
   let prompt = $state(DEFAULT_PROMPT);
+  let diagramPrompt = $state(DEFAULT_DIAGRAM_PROMPT);
   let model = $state<ModelId>(DEFAULT_MODEL);
+  let version = $state("");
+  let checking = $state(false);
 
   const modelList = Object.values(MODELS);
 
   onMount(async () => {
     apiKey = await loadApiKey();
     prompt = await loadPrompt();
+    diagramPrompt = await loadDiagramPrompt();
     model = await loadModel();
+    version = await getVersion();
   });
+
+  async function handleCheckUpdates() {
+    checking = true;
+    try {
+      const info = await checkForUpdate();
+      if (info) {
+        toast.success(`Clarity v${info.version} is available.`);
+        await openUrl(info.htmlUrl);
+      } else {
+        toast.info("You're on the latest version.");
+      }
+    } finally {
+      checking = false;
+    }
+  }
 
   async function handleSaveModel(next: ModelId) {
     model = next;
@@ -34,6 +60,14 @@
   function handleReset() {
     prompt = DEFAULT_PROMPT;
     toast.info("Prompt reset to default (not yet saved).");
+  }
+  async function handleSaveDiagramPrompt() {
+    await saveDiagramPrompt(diagramPrompt);
+    toast.success("Diagram prompt saved.");
+  }
+  function handleResetDiagramPrompt() {
+    diagramPrompt = DEFAULT_DIAGRAM_PROMPT;
+    toast.info("Diagram prompt reset to default (not yet saved).");
   }
 </script>
 
@@ -85,7 +119,29 @@
   </div>
 </section>
 
+<section class="card">
+  <div class="card-head"><ImageIcon size={17} /><h2>Diagram Prompt</h2></div>
+  <textarea rows="9" bind:value={diagramPrompt}></textarea>
+  <div class="row end">
+    <button class="btn" onclick={handleResetDiagramPrompt}><RotateCcw size={14} /> Reset</button>
+    <button class="btn primary" onclick={handleSaveDiagramPrompt}><Save size={15} /> Save prompt</button>
+  </div>
+  <p class="hint">Controls the conceptual learning diagram. Designed to avoid recreating screenshots or OS chrome (docks, menu bars) — those belong in Highlights. The model may still reference the video to match a demonstrated UI component's aesthetic.</p>
+</section>
+
+<section class="card">
+  <div class="card-head"><RefreshCw size={17} /><h2>About &amp; Updates</h2></div>
+  <div class="row">
+    <span class="version">Clarity{version ? ` v${version}` : ""}</span>
+    <button class="btn" onclick={handleCheckUpdates} disabled={checking}>
+      <RefreshCw size={14} /> {checking ? "Checking…" : "Check for updates"}
+    </button>
+  </div>
+  <p class="hint">Checks GitHub for new releases. Updates are installed manually by downloading the latest build.</p>
+</section>
+
 <style>
+
   .page-head { margin-bottom: 1.25rem; }
   h1 { font-size: 1.5rem; margin: 0; letter-spacing: -0.01em; }
   h2 { font-size: 1rem; margin: 0; }
@@ -142,6 +198,8 @@
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0.6rem 0 0; }
+  .version { font-size: 0.92rem; font-weight: 500; flex: 1; }
+
 
   .models { display: flex; gap: 0.6rem; flex-wrap: wrap; }
   .model {

@@ -1,14 +1,34 @@
 import { GoogleGenAI } from "@google/genai";
 
 export const DEFAULT_PROMPT =
-  "This video is a whiteboard working session with a person narrating. " +
-  "Produce a structured summary: (1) the main topic, (2) key points and " +
-  "decisions in order, (3) any action items or open questions raised, " +
-  "(4) a short description of what's drawn on the whiteboard and how it " +
-  "evolves. Use the spoken audio as the primary source and the whiteboard " +
-  "visuals as support.";
+  "You are creating a COMPREHENSIVE written overview of this video — not a " +
+  "short summary. The goal is that someone who never watched it could read " +
+  "your output and understand essentially everything that was said, shown, " +
+  "and decided, in full detail.\n\n" +
+  "Walk through the video chronologically and capture the complete narrative: " +
+  "every topic introduced, the reasoning and explanations given (not just the " +
+  "conclusions), concrete examples, numbers, names, and terminology used, and " +
+  "how ideas build on one another. Do not compress or omit content for the " +
+  "sake of brevity — err on the side of thoroughness and length.\n\n" +
+  "Structure it with clear Markdown headings and subheadings as the material " +
+  "warrants. Include these where applicable:\n" +
+  "- An opening overview of the main topic and purpose.\n" +
+  "- A detailed, section-by-section walkthrough following the video's flow, " +
+  "preserving the depth of each explanation.\n" +
+  "- Any decisions made, along with the rationale behind them.\n" +
+  "- All action items, open questions, or unresolved points raised.\n" +
+  "- A description of anything drawn, written, or shown visually (e.g. a " +
+  "whiteboard or screen) and how it evolves over time.\n\n" +
+  "Use the spoken audio as the primary source and the visuals as supporting " +
+  "detail. Prefer completeness over conciseness.";
 
 export type ModelId = "gemini-2.5-flash" | "gemini-2.5-pro";
+
+/** Image model used for diagram generation (separate from the text models). */
+export const IMAGE_MODEL = "gemini-3.1-flash-image";
+
+/** Flat USD cost per generated diagram image (adjust if Google changes pricing). */
+export const IMAGE_COST_PER_IMAGE = 0.04;
 
 export interface ModelInfo {
   id: ModelId;
@@ -18,6 +38,7 @@ export interface ModelInfo {
   /** USD per 1M output tokens. */
   outputPerM: number;
 }
+
 
 /**
  * Published per-1M-token rates (USD) as of 2025. Easy to update if Google
@@ -152,35 +173,102 @@ export async function uploadAndWait(
   };
 }
 
+/** A highlight moment Gemini suggests turning into a screenshot or short GIF. */
+export interface HighlightSpec {
+  label: string;
+  kind: "screenshot" | "gif";
+  /** For screenshots: the single moment in seconds. */
+  atSec?: number;
+  /** For GIFs: the clip's start in seconds. */
+  startSec?: number;
+  /** For GIFs: the clip's end in seconds. */
+  endSec?: number;
+}
+
 export interface SummaryResult {
   text: string;
+  highlights: HighlightSpec[];
   usage: TokenUsage;
 }
 
-/** Generate a summary from an already-ACTIVE file. */
+const HIGHLIGHT_INSTRUCTIONS =
+  "Also identify 3-8 of the most instructive moments worth capturing as a " +
+  "still SCREENSHOT (a key static frame, e.g. a finished diagram or an " +
+  "important result on screen). Give each a concise label and use seconds " +
+  "from the start of the video for the `atSec` timestamp.";
+
+const SUMMARY_SCHEMA = {
+  type: "object",
+  properties: {
+    summary: {
+      type: "string",
+      description: "The full structured summary in Markdown.",
+    },
+    highlights: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          label: { type: "string" },
+          kind: { type: "string", enum: ["screenshot"] },
+          atSec: { type: "number" },
+        },
+        required: ["label", "kind", "atSec"],
+      },
+    },
+  },
+  required: ["summary", "highlights"],
+};
+
+/**
+ * Combined call: returns the Markdown summary plus (optionally) structured
+ * highlight moments in a single request, so the video's input tokens are only
+ * paid for once.
+ */
 export async function generateSummary(
   apiKey: string,
   file: GeminiFile,
   prompt: string,
   model: ModelId,
-  onStatus: (s: Status) => void
+  onStatus: (s: Status) => void,
+  withHighlights = false
 ): Promise<SummaryResult> {
   const ai = client(apiKey);
   onStatus("generating");
+
+  const promptText = withHighlights
+    ? `${prompt}\n\n${HIGHLIGHT_INSTRUCTIONS}`
+    : prompt;
+
+  const config = withHighlights
+    ? { responseMimeType: "application/json", responseSchema: SUMMARY_SCHEMA as object }
+    : undefined;
+
   const response = await ai.models.generateContent({
     model,
+    config,
     contents: [
       {
         role: "user",
         parts: [
           { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
-          { text: prompt },
+          { text: promptText },
         ],
       },
     ],
   });
-  const text = response.text;
-  if (!text) throw new Error("No summary text returned from Gemini.");
+
+  const raw = response.text;
+  if (!raw) throw new Error("No summary text returned from Gemini.");
+
+  let text = raw;
+  let highlights: HighlightSpec[] = [];
+  if (withHighlights) {
+    const parsed = JSON.parse(raw) as { summary?: string; highlights?: HighlightSpec[] };
+    text = parsed.summary ?? "";
+    highlights = Array.isArray(parsed.highlights) ? parsed.highlights : [];
+    if (!text) throw new Error("No summary text returned from Gemini.");
+  }
 
   const meta = response.usageMetadata;
   const inputTokens = meta?.promptTokenCount ?? 0;
@@ -192,7 +280,76 @@ export async function generateSummary(
   };
 
   onStatus("done");
-  return { text, usage };
+  return { text, highlights, usage };
+}
+
+export interface DiagramResult {
+  /** PNG image as a data URL. */
+  image: string;
+  costUsd: number;
+}
+
+export const DEFAULT_DIAGRAM_PROMPT =
+  "Create a single, clean CONCEPTUAL diagram that helps someone LEARN the key " +
+  "ideas from this session — a teaching aid, not a screenshot recreation.\n\n" +
+  "GOAL: Organize the underlying concepts into a clear visual structure (flow, " +
+  "hierarchy, mental model, or labeled schematic — whichever best fits the " +
+  "material). Prioritize conceptual clarity and pedagogical value over visual " +
+  "fidelity to the recording.\n\n" +
+  "STRICT RULES:\n" +
+  "- Do NOT reproduce the literal scene, recording, or screen capture.\n" +
+  "- NEVER include operating-system or desktop chrome of any kind: no macOS/" +
+  "Windows dock, taskbar, menu bar, traffic-light window buttons, wallpaper, " +
+  "cursor, browser tabs, or notification badges.\n" +
+  "- Do NOT invent placeholder tokens, file names, ports, or labels like " +
+  "'<IMAGE_1>' that were not actually discussed.\n" +
+  "- You MAY use the video/frames as reference ONLY to get the aesthetic of a " +
+  "specific UI component or artifact being demonstrated correct (e.g. the look " +
+  "of a button, panel, or form that is the subject of teaching) — but render it " +
+  "as a clean, isolated, idealized element, never embedded in OS chrome.\n" +
+  "- Use legible labels, clear arrows/grouping, and a tidy layout suitable for " +
+  "teaching.\n\n" +
+  "Output only the image.";
+
+/**
+ * Generate a conceptual learning diagram from an already-ACTIVE file using the
+ * image model. Optionally include locally-sampled reference frames so the model
+ * can match the aesthetic of demonstrated UI without re-ingesting the whole
+ * video, and a user-customized prompt.
+ */
+export async function generateDiagram(
+  apiKey: string,
+  file: GeminiFile,
+  prompt: string = DEFAULT_DIAGRAM_PROMPT,
+  frames: { base64: string; mimeType: string }[] = []
+): Promise<DiagramResult> {
+  const ai = client(apiKey);
+  const frameParts = frames.map((f) => ({
+    inlineData: { data: f.base64, mimeType: f.mimeType },
+  }));
+  const response = await ai.models.generateContent({
+    model: IMAGE_MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
+          ...frameParts,
+          { text: prompt },
+        ],
+      },
+    ],
+  });
+
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    const data = part.inlineData?.data;
+    if (data) {
+      const mime = part.inlineData?.mimeType ?? "image/png";
+      return { image: `data:${mime};base64,${data}`, costUsd: IMAGE_COST_PER_IMAGE };
+    }
+  }
+  throw new Error("No diagram image returned from Gemini.");
 }
 
 /** Delete a file from the Gemini File API. */

@@ -4,19 +4,24 @@
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { confirm, save } from "@tauri-apps/plugin-dialog";
-  import { writeTextFile } from "@tauri-apps/plugin-fs";
+  import { writeTextFile, writeFile } from "@tauri-apps/plugin-fs";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { marked } from "marked";
   import {
     ArrowLeft, Trash2, Sparkles, RefreshCw, Copy, Download,
-    Cloud, CloudOff, CheckCircle2, Tag, X, Plus,
+    Cloud, CloudOff, CircleCheck, Tag, X, Plus, Image as ImageIcon,
+    Film, Camera, Play,
   } from "lucide-svelte";
-  import { loadApiKey, loadPrompt, loadModel } from "$lib/settings";
-  import { DEFAULT_MODEL, type ModelId, type Status, generateSummary } from "$lib/gemini";
+  import { loadApiKey, loadPrompt, loadDiagramPrompt, loadModel } from "$lib/settings";
   import {
-    getVideo, ensureActiveFile, saveSummary, deleteVideo, checkGeminiStatus,
-    addTag, removeTag, type VideoRecord, type GeminiStatus,
+    DEFAULT_MODEL, type ModelId, type Status, generateSummary, generateDiagram,
+  } from "$lib/gemini";
+  import {
+    getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightImage,
+    deleteVideo, checkGeminiStatus, addTag, removeTag,
+    type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
+  import { captureFrame, sampleFrames } from "$lib/frames";
   import { formatDuration } from "$lib/thumbnail";
   import { toast } from "$lib/toast";
 
@@ -24,10 +29,20 @@
   let loaded = $state(false);
   let apiKey = $state("");
   let prompt = $state("");
+  let diagramPrompt = $state("");
   let model = $state<ModelId>(DEFAULT_MODEL);
+
+  const DIAGRAM_FRAME_COUNT = 8;
 
   let status = $state<Status>("idle");
   let gemStatus = $state<GeminiStatus>("checking");
+
+  let wantDiagram = $state(true);
+  let wantHighlights = $state(true);
+  let diagramRunning = $state(false);
+  let renderingIds = $state<Set<string>>(new Set());
+
+  let playerEl = $state<HTMLVideoElement | null>(null);
 
   const id = $derived($page.params.id ?? "");
   const running = $derived(
@@ -35,6 +50,7 @@
   );
   const summaryHtml = $derived(record?.summary ? marked.parse(record.summary) : "");
   const videoSrc = $derived(record ? convertFileSrc(record.localPath) : "");
+
 
   const steps = [
     { key: "uploading", label: "Upload" },
@@ -52,10 +68,14 @@
   onMount(async () => {
     apiKey = await loadApiKey();
     prompt = await loadPrompt();
+    diagramPrompt = await loadDiagramPrompt();
     model = await loadModel();
     record = await getVideo(id);
     loaded = true;
     gemStatus = record && apiKey ? await checkGeminiStatus(apiKey, record) : "missing";
+    // Auto-render any highlights still missing their local image (e.g. captured
+    // on an older build or interrupted mid-run). This costs only compute.
+    if (record?.highlights.some((h) => !h.image)) await renderAllHighlights();
   });
 
   async function handleSummarize() {
@@ -66,16 +86,128 @@
     }
     try {
       const file = await ensureActiveFile(apiKey, record, (s) => (status = s));
-      const { text, usage } = await generateSummary(apiKey, file, prompt, model, (s) => (status = s));
-      await saveSummary(record, text, prompt, model, usage);
+      const { text, highlights, usage } = await generateSummary(
+        apiKey, file, prompt, model, (s) => (status = s), wantHighlights
+      );
+      await saveSummary(record, text, prompt, model, usage, wantHighlights ? highlights : undefined);
+
+      if (wantDiagram) {
+        diagramRunning = true;
+        // Sample real frames locally so the image model can match demonstrated
+        // UI aesthetics without re-ingesting (and re-billing) the whole video.
+        const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
+        const diagram = await generateDiagram(apiKey, file, diagramPrompt, frames);
+        await saveDiagram(record, diagram.image, diagram.costUsd);
+        diagramRunning = false;
+      }
+
       record = await getVideo(id);
       gemStatus = "active";
       status = "idle";
       toast.success("Summary ready.");
+      // Highlight images are captured locally (no API cost), so render them
+      // automatically rather than making the user click each one.
+      if (wantHighlights) await renderAllHighlights();
     } catch (err) {
       status = "error";
+      diagramRunning = false;
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function handleRegenerateDiagram() {
+    if (!record || diagramRunning) return;
+    if (!apiKey) {
+      toast.error("Set your Gemini API key in Settings first.");
+      return;
+    }
+    try {
+      diagramRunning = true;
+      const file = await ensureActiveFile(apiKey, record, (s) => (status = s));
+      status = "idle";
+      // Re-sample frames so the image model has fresh local reference material.
+      const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
+      const diagram = await generateDiagram(apiKey, file, diagramPrompt, frames);
+      await saveDiagram(record, diagram.image, diagram.costUsd);
+      record = await getVideo(id);
+      gemStatus = "active";
+      toast.success("Diagram regenerated.");
+    } catch (err) {
+      status = "idle";
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      diagramRunning = false;
+    }
+  }
+
+  function seekPlayer(sec: number | null) {
+    if (playerEl && sec != null) {
+      playerEl.currentTime = sec;
+      playerEl.play().catch(() => {});
+      playerEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
+  async function renderHighlight(h: Highlight) {
+    if (!record || renderingIds.has(h.id)) return;
+    renderingIds = new Set(renderingIds).add(h.id);
+    try {
+      // Highlights are captured as still screenshots for reliability.
+      const image = await captureFrame(record.localPath, h.atSec ?? h.startSec ?? 0);
+      await saveHighlightImage(record, h.id, image);
+      record = await getVideo(id);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      const next = new Set(renderingIds);
+      next.delete(h.id);
+      renderingIds = next;
+    }
+  }
+
+  async function renderAllHighlights() {
+    if (!record) return;
+    for (const h of record.highlights) {
+      if (!h.image) await renderHighlight(h);
+    }
+  }
+
+  async function exportHighlight(h: Highlight) {
+    if (!h.image) return;
+    const base = h.label.replace(/[^\w]+/g, "-").toLowerCase().slice(0, 40) || "highlight";
+    const path = await save({
+      defaultPath: `${base}.png`,
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (!path) return;
+    const bytes = dataUrlToBytes(h.image);
+    await writeFile(path, bytes);
+    toast.success("Exported.");
+  }
+
+  async function exportDiagram() {
+    if (!record?.diagram) return;
+    const base = record.videoName.replace(/\.[^.]+$/, "");
+    const path = await save({
+      defaultPath: `${base}-diagram.png`,
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (!path) return;
+    await writeFile(path, dataUrlToBytes(record.diagram));
+    toast.success("Diagram exported.");
+  }
+
+  function dataUrlToBytes(dataUrl: string): Uint8Array {
+    const base64 = dataUrl.split(",")[1] ?? "";
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  function fmtTime(sec: number | null): string {
+    if (sec == null) return "";
+    return formatDuration(sec) ?? "";
   }
 
   async function handleCopy() {
@@ -153,7 +285,7 @@
 
   <div class="player card">
     <!-- svelte-ignore a11y_media_has_caption -->
-    <video src={videoSrc} controls preload="metadata"></video>
+    <video bind:this={playerEl} src={videoSrc} controls preload="metadata"></video>
   </div>
 
   <section class="card">
@@ -166,7 +298,7 @@
       {#if gemStatus === "checking"}
         <span class="badge"><Cloud size={13} /> Checking Gemini…</span>
       {:else if gemStatus === "active"}
-        <span class="badge gem-ok"><CheckCircle2 size={13} /> On Gemini</span>
+        <span class="badge gem-ok"><CircleCheck size={13} /> On Gemini</span>
       {:else if record.geminiName}
         <span class="badge warn"><RefreshCw size={13} /> Expired — will re-upload</span>
       {:else}
@@ -201,7 +333,7 @@
         {#each steps as step, i}
           <div class="step" class:active={stepIndex === i} class:done={stepIndex > i}>
             <span class="dot">
-              {#if stepIndex > i}<CheckCircle2 size={14} />{:else if stepIndex === i}<span class="pulse"></span>{:else}{i + 1}{/if}
+              {#if stepIndex > i}<CircleCheck size={14} />{:else if stepIndex === i}<span class="pulse"></span>{:else}{i + 1}{/if}
             </span>
             <span class="step-label">{step.label}</span>
           </div>
@@ -210,10 +342,23 @@
       </div>
     {/if}
 
+    <div class="gen-options">
+      <label class="opt">
+        <input type="checkbox" bind:checked={wantDiagram} disabled={running} />
+        <ImageIcon size={14} /> Generate diagram
+      </label>
+      <label class="opt">
+        <input type="checkbox" bind:checked={wantHighlights} disabled={running} />
+        <Film size={14} /> Detect highlight moments
+      </label>
+    </div>
+
     <div class="actions">
-      <button class="btn primary" onclick={handleSummarize} disabled={running || !apiKey}>
+      <button class="btn primary" onclick={handleSummarize} disabled={running || diagramRunning || !apiKey}>
         {#if running}
           <span class="mini-spin"></span> Working…
+        {:else if diagramRunning}
+          <span class="mini-spin"></span> Drawing diagram…
         {:else if record.summary}
           <RefreshCw size={15} /> Re-summarize
         {:else}
@@ -248,6 +393,68 @@
         </div>
       {/if}
       <div class="summary markdown">{@html summaryHtml}</div>
+    </section>
+  {/if}
+
+  {#if record.diagram}
+    <section class="card" in:fly={{ y: 16, duration: 300 }}>
+      <div class="summary-head">
+        <h2><ImageIcon size={16} /> Diagram</h2>
+        <div class="actions">
+          <button class="btn" onclick={handleRegenerateDiagram} disabled={diagramRunning || running || !apiKey}>
+            {#if diagramRunning}<span class="mini-spin dark"></span> Regenerating…{:else}<RefreshCw size={14} /> Regenerate{/if}
+          </button>
+          <button class="btn" onclick={exportDiagram}><Download size={14} /> Export</button>
+        </div>
+      </div>
+      {#if record.diagramCostUsd != null}
+        <div class="meta-row mono"><span>{`Gemini image · ~${fmtCost(record.diagramCostUsd)}`}</span></div>
+      {/if}
+      <img class="diagram" src={record.diagram} alt="Generated diagram" />
+    </section>
+  {/if}
+
+  {#if record.highlights.length > 0}
+    <section class="card" in:fly={{ y: 16, duration: 300 }}>
+      <div class="summary-head">
+        <h2><Film size={16} /> Highlights</h2>
+      </div>
+      <div class="highlight-grid">
+        {#each record.highlights as h (h.id)}
+          <div class="highlight">
+            <div class="hl-media">
+              {#if h.image}
+                <img src={h.image} alt={h.label} />
+              {:else}
+                <div class="hl-placeholder">
+                  {#if h.kind === "gif"}<Film size={22} />{:else}<Camera size={22} />{/if}
+                </div>
+              {/if}
+              <span class="hl-kind">
+                {#if h.kind === "gif"}<Film size={11} /> GIF{:else}<Camera size={11} /> Frame{/if}
+              </span>
+            </div>
+            <div class="hl-body">
+              <div class="hl-label">{h.label}</div>
+              <div class="hl-time">
+                {#if h.kind === "gif"}{fmtTime(h.startSec)}–{fmtTime(h.endSec)}{:else}{fmtTime(h.atSec ?? h.startSec)}{/if}
+              </div>
+              <div class="hl-actions">
+                <button class="btn small-btn" onclick={() => seekPlayer(h.atSec ?? h.startSec)}>
+                  <Play size={12} /> Jump
+                </button>
+                {#if h.image}
+                  <button class="btn small-btn" onclick={() => exportHighlight(h)}>
+                    <Download size={12} /> Save
+                  </button>
+                {:else if renderingIds.has(h.id)}
+                  <span class="hl-rendering"><span class="mini-spin dark"></span> Rendering…</span>
+                {/if}
+              </div>
+            </div>
+          </div>
+        {/each}
+      </div>
     </section>
   {/if}
 {/if}
@@ -429,5 +636,81 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
+  .mini-spin.dark { border-color: color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .gen-options { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.4rem; }
+  .opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.86rem;
+    color: var(--text-dim);
+    cursor: pointer;
+    user-select: none;
+  }
+  .opt input { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+  .opt :global(svg) { color: var(--accent); }
+
+  .diagram {
+    margin-top: 0.7rem;
+    width: 100%;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: #fff;
+  }
+
+  .highlight-grid {
+    margin-top: 0.7rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 0.8rem;
+  }
+  .highlight {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .hl-media {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    background: #000;
+  }
+  .hl-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .hl-placeholder {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    color: var(--text-dim);
+    background: var(--hover);
+  }
+  .hl-kind {
+    position: absolute;
+    top: 0.4rem;
+    left: 0.4rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.68rem;
+    padding: 0.12rem 0.4rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+  }
+  .hl-body { padding: 0.55rem 0.65rem 0.65rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  .hl-label { font-size: 0.84rem; font-weight: 500; line-height: 1.3; }
+  .hl-time { font-size: 0.72rem; color: var(--text-dim); font-family: "JetBrains Mono", monospace; }
+  .hl-actions { display: flex; gap: 0.35rem; margin-top: 0.15rem; align-items: center; }
+  .hl-rendering {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.74rem;
+    color: var(--text-dim);
+  }
+  .small-btn { padding: 0.3rem 0.5rem; font-size: 0.76rem; }
 </style>

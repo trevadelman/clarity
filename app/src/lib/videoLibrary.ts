@@ -17,11 +17,24 @@ import {
   type GeminiFile,
   type Status,
   type TokenUsage,
+  type HighlightSpec,
 } from "./gemini";
 
 const STORE_FILE = "library.json";
 const KEY_VIDEOS = "videos";
 const VIDEO_DIR = "videos";
+
+/** A highlight moment, with its locally-rendered image once generated. */
+export interface Highlight {
+  id: string;
+  label: string;
+  kind: "screenshot" | "gif";
+  atSec: number | null;
+  startSec: number | null;
+  endSec: number | null;
+  /** Rendered screenshot (PNG) or GIF as a data URL; null until generated. */
+  image: string | null;
+}
 
 export interface VideoRecord {
   id: string;
@@ -44,7 +57,14 @@ export interface VideoRecord {
   summaryInputTokens: number | null;
   summaryOutputTokens: number | null;
   summaryCostUsd: number | null;
+
+  diagram: string | null;
+  diagramGeneratedAt: string | null;
+  diagramCostUsd: number | null;
+
+  highlights: Highlight[];
 }
+
 
 let storePromise: Promise<Store> | null = null;
 function getStore(): Promise<Store> {
@@ -65,7 +85,10 @@ async function writeAll(records: VideoRecord[]): Promise<void> {
 
 export async function listVideos(): Promise<VideoRecord[]> {
   const records = await readAll();
-  for (const r of records) if (!Array.isArray(r.tags)) r.tags = [];
+  for (const r of records) {
+    if (!Array.isArray(r.tags)) r.tags = [];
+    if (!Array.isArray(r.highlights)) r.highlights = [];
+  }
   return records.sort((a, b) => b.addedAt.localeCompare(a.addedAt));
 }
 
@@ -156,6 +179,10 @@ export async function addVideo(sourcePath: string): Promise<VideoRecord> {
     summaryInputTokens: null,
     summaryOutputTokens: null,
     summaryCostUsd: null,
+    diagram: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
   };
   await upsert(record);
   return record;
@@ -207,7 +234,8 @@ export async function saveSummary(
   summary: string,
   prompt: string,
   model: string,
-  usage: TokenUsage
+  usage: TokenUsage,
+  highlights?: HighlightSpec[]
 ): Promise<void> {
   record.summary = summary;
   record.summaryPrompt = prompt;
@@ -216,6 +244,42 @@ export async function saveSummary(
   record.summaryInputTokens = usage.inputTokens;
   record.summaryOutputTokens = usage.outputTokens;
   record.summaryCostUsd = usage.costUsd;
+  if (highlights) record.highlights = highlights.map(specToHighlight);
+  await upsert(record);
+}
+
+function specToHighlight(spec: HighlightSpec): Highlight {
+  return {
+    id: crypto.randomUUID(),
+    label: spec.label,
+    kind: spec.kind,
+    atSec: spec.atSec ?? null,
+    startSec: spec.startSec ?? null,
+    endSec: spec.endSec ?? null,
+    image: null,
+  };
+}
+
+/** Persist a generated diagram image (PNG data URL) onto a record. */
+export async function saveDiagram(
+  record: VideoRecord,
+  image: string,
+  costUsd: number
+): Promise<void> {
+  record.diagram = image;
+  record.diagramGeneratedAt = new Date().toISOString();
+  record.diagramCostUsd = costUsd;
+  await upsert(record);
+}
+
+/** Store a rendered image (screenshot/GIF data URL) on a single highlight. */
+export async function saveHighlightImage(
+  record: VideoRecord,
+  highlightId: string,
+  image: string
+): Promise<void> {
+  const h = record.highlights.find((x) => x.id === highlightId);
+  if (h) h.image = image;
   await upsert(record);
 }
 

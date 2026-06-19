@@ -270,7 +270,7 @@
     color: #fff;
     flex-shrink: 0;
   }
-  .brand-text { font-size: 0.82rem; line-height: 1.2; color: #b9b9c6; }
+  .brand-text { font-size: 0.82rem; line-height: 1.2; color: #b9b9c6; white-space: nowrap; }
   .brand-text strong { color: #fff; font-size: 0.95rem; }
 
   .links { display: flex; flex-direction: column; gap: 0.2rem; }

@@ -16,7 +16,7 @@
   ];
 
   let update = $state<UpdateInfo | null>(null);
-  let collapsed = $state(false);
+  let collapsed = $state(true);
 
   function isActive(href: string, path: string): boolean {
     return href === "/" ? path === "/" : path.startsWith(href);

@@ -1,15 +1,11 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { GIFEncoder, quantize, applyPalette } from "gifenc";
 
 // Screenshots are captured at (near) native resolution for crisp stills.
 const SCREENSHOT_MAX_WIDTH = 1920;
-// GIFs stay smaller to keep the animated file size reasonable.
-const GIF_MAX_WIDTH = 720;
 // Frames sent to the image model as reference material.
 const SAMPLE_MAX_WIDTH = 768;
-const GIF_FPS = 10;
-const GIF_MAX_SECONDS = 6;
 const SEEK_TIMEOUT_MS = 10000;
+
 
 /** Load a local video element ready for seeking, sized down to MAX_WIDTH. */
 function loadVideo(localPath: string): Promise<HTMLVideoElement> {
@@ -140,53 +136,8 @@ export async function captureFrame(localPath: string, atSec: number): Promise<st
   }
 }
 
-/** Capture an animated GIF for [startSec, endSec], returned as a data URL. */
-export async function captureGif(
-  localPath: string,
-  startSec: number,
-  endSec: number
-): Promise<string> {
-  const video = await loadVideo(localPath);
-  try {
-    const { w, h } = scaledSize(video, GIF_MAX_WIDTH);
-    const duration = Math.min(Math.max(endSec - startSec, 0.5), GIF_MAX_SECONDS);
-    const frameCount = Math.max(2, Math.round(duration * GIF_FPS));
-    const delayMs = Math.round(1000 / GIF_FPS);
-
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) throw new Error("Canvas not available.");
-
-    const gif = GIFEncoder();
-    for (let i = 0; i < frameCount; i++) {
-      const t = startSec + (duration * i) / (frameCount - 1);
-      await seekTo(video, t);
-      // Ensure the seeked frame is actually decoded before we read it, so each
-      // GIF frame is distinct rather than a repeat of the first.
-      await waitForFrame(video);
-      ctx.drawImage(video, 0, 0, w, h);
-      const { data } = ctx.getImageData(0, 0, w, h);
-      const palette = quantize(data, 256);
-      const index = applyPalette(data, palette);
-      // gifenc defaults to `repeat: -1` (play once). Set `repeat: 0` on the
-      // first frame to write the Netscape loop extension so the GIF animates
-      // forever instead of freezing on the last frame.
-      gif.writeFrame(index, w, h, i === 0 ? { palette, delay: delayMs, repeat: 0 } : { palette, delay: delayMs });
-    }
-    gif.finish();
-
-    const bytes = gif.bytes();
-    let binary = "";
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return `data:image/gif;base64,${btoa(binary)}`;
-  } finally {
-    releaseVideo(video);
-  }
-}
-
 /**
+
  * Capture `count` evenly-spaced still frames across the whole video as raw
  * base64 PNG strings (no data-URL prefix), suitable for sending to an image
  * model as inline reference material. Frames are sampled between 5% and 95% of

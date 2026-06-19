@@ -4,7 +4,7 @@
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
   import { confirm, save } from "@tauri-apps/plugin-dialog";
-  import { writeTextFile, writeFile } from "@tauri-apps/plugin-fs";
+  import { writeTextFile, writeFile, readFile } from "@tauri-apps/plugin-fs";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import { marked } from "marked";
   import {
@@ -12,18 +12,22 @@
     Cloud, CloudOff, CircleCheck, Tag, X, Plus, Image as ImageIcon,
     Film, Camera, Play,
   } from "lucide-svelte";
+
   import { loadApiKey, loadPrompt, loadDiagramPrompt, loadModel } from "$lib/settings";
   import {
     DEFAULT_MODEL, type ModelId, type Status, generateSummary, generateDiagram,
   } from "$lib/gemini";
   import {
-    getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightImage,
+    getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import { captureFrame, sampleFrames } from "$lib/frames";
+
+  import { mediaSrc, mediaAbsPath } from "$lib/media";
   import { formatDuration } from "$lib/thumbnail";
   import { toast } from "$lib/toast";
+
 
   let record = $state<VideoRecord | null>(null);
   let loaded = $state(false);
@@ -44,7 +48,14 @@
 
   let playerEl = $state<HTMLVideoElement | null>(null);
 
+  // Resolved asset-protocol URLs for disk-backed media (paths are async).
+  let diagramUrl = $state("");
+  let highlightUrls = $state<Record<string, string>>({});
+  let lightbox = $state<{ src: string; label: string } | null>(null);
+
+
   const id = $derived($page.params.id ?? "");
+
   const running = $derived(
     status === "uploading" || status === "processing" || status === "generating"
   );
@@ -73,10 +84,23 @@
     record = await getVideo(id);
     loaded = true;
     gemStatus = record && apiKey ? await checkGeminiStatus(apiKey, record) : "missing";
-    // Auto-render any highlights still missing their local image (e.g. captured
+    // Auto-render any highlights still missing their local media (e.g. captured
     // on an older build or interrupted mid-run). This costs only compute.
-    if (record?.highlights.some((h) => !h.image)) await renderAllHighlights();
+    if (record?.highlights.some((h) => !h.mediaPath)) await renderAllHighlights();
+    await resolveMediaUrls();
   });
+
+  /** Resolve all disk-backed media paths into asset-protocol URLs for display. */
+  async function resolveMediaUrls() {
+    if (!record) return;
+    diagramUrl = record.diagramPath ? await mediaSrc(record.diagramPath) : "";
+    const urls: Record<string, string> = {};
+    for (const h of record.highlights) {
+      if (h.mediaPath) urls[h.id] = await mediaSrc(h.mediaPath);
+    }
+    highlightUrls = urls;
+  }
+
 
   async function handleSummarize() {
     if (!record) return;
@@ -152,10 +176,12 @@
     if (!record || renderingIds.has(h.id)) return;
     renderingIds = new Set(renderingIds).add(h.id);
     try {
-      // Highlights are captured as still screenshots for reliability.
-      const image = await captureFrame(record.localPath, h.atSec ?? h.startSec ?? 0);
-      await saveHighlightImage(record, h.id, image);
+      // Capture a still frame at the highlighted moment, stored on disk.
+      const image = await captureFrame(record.localPath, h.atSec ?? 0);
+      await saveHighlightMedia(record, h.id, image);
       record = await getVideo(id);
+
+      await resolveMediaUrls();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     } finally {
@@ -168,42 +194,42 @@
   async function renderAllHighlights() {
     if (!record) return;
     for (const h of record.highlights) {
-      if (!h.image) await renderHighlight(h);
+      if (!h.mediaPath) await renderHighlight(h);
     }
   }
 
   async function exportHighlight(h: Highlight) {
-    if (!h.image) return;
+    if (!h.mediaPath || !record) return;
     const base = h.label.replace(/[^\w]+/g, "-").toLowerCase().slice(0, 40) || "highlight";
     const path = await save({
       defaultPath: `${base}.png`,
       filters: [{ name: "PNG", extensions: ["png"] }],
     });
     if (!path) return;
-    const bytes = dataUrlToBytes(h.image);
-    await writeFile(path, bytes);
+    await writeFile(path, await readFile(await mediaAbsPath(h.mediaPath)));
     toast.success("Exported.");
   }
 
+
   async function exportDiagram() {
-    if (!record?.diagram) return;
+    if (!record?.diagramPath) return;
     const base = record.videoName.replace(/\.[^.]+$/, "");
     const path = await save({
       defaultPath: `${base}-diagram.png`,
       filters: [{ name: "PNG", extensions: ["png"] }],
     });
     if (!path) return;
-    await writeFile(path, dataUrlToBytes(record.diagram));
+    await writeFile(path, await readFile(await mediaAbsPath(record.diagramPath)));
     toast.success("Diagram exported.");
   }
 
-  function dataUrlToBytes(dataUrl: string): Uint8Array {
-    const base64 = dataUrl.split(",")[1] ?? "";
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
+  function openLightbox(h: Highlight) {
+    const src = highlightUrls[h.id];
+    if (!src) return;
+    lightbox = { src, label: h.label };
   }
+
+
 
   function fmtTime(sec: number | null): string {
     if (sec == null) return "";
@@ -396,7 +422,7 @@
     </section>
   {/if}
 
-  {#if record.diagram}
+  {#if record.diagramPath}
     <section class="card" in:fly={{ y: 16, duration: 300 }}>
       <div class="summary-head">
         <h2><ImageIcon size={16} /> Diagram</h2>
@@ -410,9 +436,12 @@
       {#if record.diagramCostUsd != null}
         <div class="meta-row mono"><span>{`Gemini image · ~${fmtCost(record.diagramCostUsd)}`}</span></div>
       {/if}
-      <img class="diagram" src={record.diagram} alt="Generated diagram" />
+      {#if diagramUrl}
+        <img class="diagram" src={diagramUrl} alt="Generated diagram" />
+      {/if}
     </section>
   {/if}
+
 
   {#if record.highlights.length > 0}
     <section class="card" in:fly={{ y: 16, duration: 300 }}>
@@ -422,28 +451,28 @@
       <div class="highlight-grid">
         {#each record.highlights as h (h.id)}
           <div class="highlight">
-            <div class="hl-media">
-              {#if h.image}
-                <img src={h.image} alt={h.label} />
+            <button
+              type="button"
+              class="hl-media"
+              onclick={() => openLightbox(h)}
+              disabled={!highlightUrls[h.id]}
+            >
+              {#if highlightUrls[h.id]}
+                <img src={highlightUrls[h.id]} alt={h.label} />
               {:else}
-                <div class="hl-placeholder">
-                  {#if h.kind === "gif"}<Film size={22} />{:else}<Camera size={22} />{/if}
-                </div>
+                <div class="hl-placeholder"><Camera size={22} /></div>
               {/if}
-              <span class="hl-kind">
-                {#if h.kind === "gif"}<Film size={11} /> GIF{:else}<Camera size={11} /> Frame{/if}
-              </span>
-            </div>
+              <span class="hl-kind"><Camera size={11} /> Frame</span>
+            </button>
             <div class="hl-body">
               <div class="hl-label">{h.label}</div>
-              <div class="hl-time">
-                {#if h.kind === "gif"}{fmtTime(h.startSec)}–{fmtTime(h.endSec)}{:else}{fmtTime(h.atSec ?? h.startSec)}{/if}
-              </div>
+              <div class="hl-time">{fmtTime(h.atSec)}</div>
               <div class="hl-actions">
-                <button class="btn small-btn" onclick={() => seekPlayer(h.atSec ?? h.startSec)}>
+                <button class="btn small-btn" onclick={() => seekPlayer(h.atSec)}>
+
                   <Play size={12} /> Jump
                 </button>
-                {#if h.image}
+                {#if h.mediaPath}
                   <button class="btn small-btn" onclick={() => exportHighlight(h)}>
                     <Download size={12} /> Save
                   </button>
@@ -454,8 +483,32 @@
             </div>
           </div>
         {/each}
+
       </div>
     </section>
+  {/if}
+
+  {#if lightbox}
+    <div
+      class="lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label={lightbox.label}
+      tabindex="-1"
+      transition:fade={{ duration: 150 }}
+      onclick={() => (lightbox = null)}
+      onkeydown={(e) => { if (e.key === "Escape") lightbox = null; }}
+    >
+      <button class="lightbox-close" onclick={() => (lightbox = null)} aria-label="Close">
+        <X size={22} />
+      </button>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="lightbox-inner" role="presentation" onclick={(e) => e.stopPropagation()}>
+        <img src={lightbox.src} alt={lightbox.label} />
+        <p class="lightbox-label">{lightbox.label}</p>
+      </div>
+
+    </div>
   {/if}
 {/if}
 
@@ -678,8 +731,50 @@
     position: relative;
     aspect-ratio: 16 / 9;
     background: #000;
+    border: none;
+    padding: 0;
+    width: 100%;
+    cursor: pointer;
+    display: block;
   }
+  .hl-media:disabled { cursor: default; }
   .hl-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+
+  .lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.82);
+    display: grid;
+    place-items: center;
+    padding: 2rem;
+  }
+  .lightbox-close {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    cursor: pointer;
+  }
+  .lightbox-close:hover { background: rgba(255, 255, 255, 0.24); }
+  .lightbox-inner { max-width: 90vw; max-height: 85vh; text-align: center; }
+  .lightbox-inner img {
+    max-width: 90vw;
+    max-height: 78vh;
+    border-radius: var(--radius-sm);
+    background: #000;
+  }
+
+  .lightbox-label { color: #fff; margin: 0.75rem 0 0; font-size: 0.9rem; }
+
   .hl-placeholder {
     width: 100%;
     height: 100%;

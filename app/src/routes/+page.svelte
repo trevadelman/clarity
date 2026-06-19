@@ -5,13 +5,16 @@
   import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X } from "lucide-svelte";
   import { listVideos, listAllTags, clearAll, type VideoRecord } from "$lib/videoLibrary";
   import { formatDuration } from "$lib/thumbnail";
+  import { mediaSrc } from "$lib/media";
   import { loadApiKey } from "$lib/settings";
   import { toast } from "$lib/toast";
 
   let videos = $state<VideoRecord[]>([]);
   let allTags = $state<string[]>([]);
+  let thumbUrls = $state<Record<string, string>>({});
   let loaded = $state(false);
   let clearing = $state(false);
+
 
   let query = $state("");
   let activeTags = $state<string[]>([]);
@@ -40,7 +43,13 @@
   async function refresh() {
     videos = await listVideos();
     allTags = await listAllTags();
+    const urls: Record<string, string> = {};
+    for (const v of videos) {
+      if (v.thumbnailPath) urls[v.id] = await mediaSrc(v.thumbnailPath);
+    }
+    thumbUrls = urls;
   }
+
 
   onMount(async () => {
     await refresh();
@@ -147,9 +156,10 @@
       <li in:fly={{ y: 14, duration: 240, delay: i * 40 }}>
         <a class="card" href={`/video/${v.id}`}>
           <div class="thumb">
-            {#if v.thumbnail}
-              <img src={v.thumbnail} alt="" />
+            {#if thumbUrls[v.id]}
+              <img src={thumbUrls[v.id]} alt="" />
             {:else}
+
               <span class="thumb-fallback"><Film size={28} /></span>
             {/if}
             {#if formatDuration(v.durationSec)}

@@ -1,6 +1,6 @@
 {
   "name": "app",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "",
   "type": "module",
   "scripts": {
@@ -21,7 +21,6 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-store": "^2.4.3",
     "@tauri-apps/plugin-updater": "^2.10.1",
-    "gifenc": "^1.0.3",
     "lucide-svelte": "^1.0.1",
     "marked": "^18.0.5"
   },

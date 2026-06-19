@@ -173,17 +173,14 @@ export async function uploadAndWait(
   };
 }
 
-/** A highlight moment Gemini suggests turning into a screenshot or short GIF. */
+/** A highlight moment Gemini suggests turning into a screenshot. */
 export interface HighlightSpec {
   label: string;
-  kind: "screenshot" | "gif";
-  /** For screenshots: the single moment in seconds. */
-  atSec?: number;
-  /** For GIFs: the clip's start in seconds. */
-  startSec?: number;
-  /** For GIFs: the clip's end in seconds. */
-  endSec?: number;
+  /** The single moment to capture, in seconds. */
+  atSec: number;
 }
+
+
 
 export interface SummaryResult {
   text: string;
@@ -192,10 +189,10 @@ export interface SummaryResult {
 }
 
 const HIGHLIGHT_INSTRUCTIONS =
-  "Also identify 3-8 of the most instructive moments worth capturing as a " +
-  "still SCREENSHOT (a key static frame, e.g. a finished diagram or an " +
-  "important result on screen). Give each a concise label and use seconds " +
-  "from the start of the video for the `atSec` timestamp.";
+  "Also identify 3-8 of the most instructive moments worth capturing as still " +
+  "SCREENSHOTS — key static frames such as a finished diagram, an important " +
+  "result on screen, or a pivotal step. For each, set `atSec` to the exact " +
+  "moment in seconds and give it a concise label.";
 
 const SUMMARY_SCHEMA = {
   type: "object",
@@ -210,15 +207,16 @@ const SUMMARY_SCHEMA = {
         type: "object",
         properties: {
           label: { type: "string" },
-          kind: { type: "string", enum: ["screenshot"] },
-          atSec: { type: "number" },
+          atSec: { type: "number", description: "Screenshot moment (seconds)." },
         },
-        required: ["label", "kind", "atSec"],
+        required: ["label", "atSec"],
       },
     },
   },
   required: ["summary", "highlights"],
 };
+
+
 
 /**
  * Combined call: returns the Markdown summary plus (optionally) structured

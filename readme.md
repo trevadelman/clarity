@@ -58,6 +58,16 @@ npm run tauri build
 
 The `.dmg` lands in `app/src-tauri/target/release/bundle/dmg/`.
 
+## Releasing (signed auto-update builds)
+
+Clarity ships **in-app auto-update** (Tauri updater). Cutting a release is more
+than `tauri build` — each release must include a signed updater artifact and a
+`latest.json` manifest so installed copies can update themselves.
+
+See **[`docs/releasing.md`](docs/releasing.md)** for the exact, step-by-step
+process (version bump → signed build → manifest → GitHub release).
+
+
 ## Stack / decisions
 
 - **D1 Svelte**, **D2 Gemini call in frontend JS** (`@google/genai`),

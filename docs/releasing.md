@@ -45,6 +45,32 @@ These steps were done once and do **not** need to be repeated:
 > you'd have to ship a new public key in a new manual build, and existing installs
 > could no longer auto-update. Keep `app/.tauri-keys/clarity.key` backed up safely.
 
+### Where the private key is backed up
+
+The signing private key is **gitignored** (never committed — not even to a private
+repo, since git history would replicate it). It is backed up in the **macOS login
+Keychain** on the maintainer's Mac.
+
+- **Store / update it:**
+  ```bash
+  cd app
+  security add-generic-password -a "$USER" \
+    -s "clarity-tauri-updater-private-key" \
+    -w "$(cat .tauri-keys/clarity.key)" -U
+  ```
+- **Recover it** (e.g. after a fresh checkout where `.tauri-keys/` is absent):
+  ```bash
+  mkdir -p app/.tauri-keys
+  security find-generic-password -s "clarity-tauri-updater-private-key" -w \
+    > app/.tauri-keys/clarity.key
+  ```
+- The key has an **empty password** (`TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""`).
+
+> The Keychain is local to that one Mac. For resilience against a lost/dead
+> machine, also keep one off-machine copy (password manager or encrypted volume).
+> Do **not** use GitHub Secrets for this — Secrets are write-only/CI-oriented and
+> can't be read back, so they don't serve as a recoverable backup.
+
 ---
 
 ## Per-release checklist

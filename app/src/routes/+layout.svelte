@@ -52,7 +52,7 @@
   <nav class="sidebar" class:collapsed>
     <button class="brand" onclick={() => (collapsed = !collapsed)} title="Toggle sidebar">
       <span class="logo"><Video size={18} /></span>
-      <span class="brand-text"><strong>Clarity</strong><br />Video summaries</span>
+      <span class="brand-text"><strong>Clarity</strong><br />Make It Make Sense</span>
     </button>
 
     <div class="links">

@@ -146,7 +146,10 @@
 
   .update-bar {
     position: sticky;
-    top: 0;
+    /* Offset below the titlebar drag strip so the full-width banner doesn't
+       cover the macOS traffic-light buttons (which would block their clicks). */
+    top: 32px;
+    margin-top: 32px;
     z-index: 800;
     display: flex;
     align-items: center;

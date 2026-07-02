@@ -10,16 +10,17 @@
   import {
     ArrowLeft, Trash2, Sparkles, RefreshCw, Copy, Download,
     Cloud, CloudOff, CircleCheck, Tag, X, Plus, Image as ImageIcon,
-    Film, Camera, Play,
+    Film, Camera, Play, SlidersHorizontal, ChevronDown,
   } from "lucide-svelte";
 
   import { loadApiKey, loadPrompt, loadDiagramPrompt, loadModel } from "$lib/settings";
   import {
     DEFAULT_MODEL, type ModelId, type Status, generateSummary, generateDiagram,
+    composePrompt,
   } from "$lib/gemini";
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
-    deleteVideo, checkGeminiStatus, addTag, removeTag,
+    deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import { captureFrame, sampleFrames } from "$lib/frames";
@@ -43,6 +44,9 @@
 
   let wantDiagram = $state(true);
   let wantHighlights = $state(true);
+  let instructionsOpen = $state(false);
+  let customInstructions = $state("");
+  let customDiagramInstructions = $state("");
   let diagramRunning = $state(false);
   let renderingIds = $state<Set<string>>(new Set());
 
@@ -82,6 +86,8 @@
     diagramPrompt = await loadDiagramPrompt();
     model = await loadModel();
     record = await getVideo(id);
+    customInstructions = record?.customInstructions ?? "";
+    customDiagramInstructions = record?.customDiagramInstructions ?? "";
     loaded = true;
     gemStatus = record && apiKey ? await checkGeminiStatus(apiKey, record) : "missing";
     // Auto-render any highlights still missing their local media (e.g. captured
@@ -93,7 +99,12 @@
   /** Resolve all disk-backed media paths into asset-protocol URLs for display. */
   async function resolveMediaUrls() {
     if (!record) return;
-    diagramUrl = record.diagramPath ? await mediaSrc(record.diagramPath) : "";
+    // Cache-bust the diagram: the file is always saved under the same
+    // filename, so without a changing query param the browser/webview would
+    // keep showing the previously-cached image after a regenerate.
+    diagramUrl = record.diagramPath
+      ? `${await mediaSrc(record.diagramPath)}?t=${record.diagramGeneratedAt ?? ""}`
+      : "";
     const urls: Record<string, string> = {};
     for (const h of record.highlights) {
       if (h.mediaPath) urls[h.id] = await mediaSrc(h.mediaPath);
@@ -102,6 +113,16 @@
   }
 
 
+  /** Persist the current custom-instruction inputs onto the record. */
+  async function persistInstructions() {
+    if (!record) return;
+    await saveCustomInstructions(record, customInstructions, customDiagramInstructions);
+  }
+
+  const hasInstructions = $derived(
+    customInstructions.trim() !== "" || customDiagramInstructions.trim() !== ""
+  );
+
   async function handleSummarize() {
     if (!record) return;
     if (!apiKey) {
@@ -109,18 +130,22 @@
       return;
     }
     try {
+      await persistInstructions();
+      const effectivePrompt = composePrompt(prompt, customInstructions);
       const file = await ensureActiveFile(apiKey, record, (s) => (status = s));
       const { text, highlights, usage } = await generateSummary(
-        apiKey, file, prompt, model, (s) => (status = s), wantHighlights
+        apiKey, file, effectivePrompt, model, (s) => (status = s), wantHighlights
       );
-      await saveSummary(record, text, prompt, model, usage, wantHighlights ? highlights : undefined);
+      await saveSummary(record, text, effectivePrompt, model, usage, wantHighlights ? highlights : undefined);
 
       if (wantDiagram) {
         diagramRunning = true;
         // Sample real frames locally so the image model can match demonstrated
         // UI aesthetics without re-ingesting (and re-billing) the whole video.
         const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
-        const diagram = await generateDiagram(apiKey, file, diagramPrompt, frames);
+        const diagram = await generateDiagram(
+          apiKey, text, composePrompt(diagramPrompt, customDiagramInstructions), frames
+        );
         await saveDiagram(record, diagram.image, diagram.costUsd);
         diagramRunning = false;
       }
@@ -145,16 +170,23 @@
       toast.error("Set your Gemini API key in Settings first.");
       return;
     }
+    if (!record.summary) {
+      toast.error("Summarize the video first — the diagram is generated from the summary.");
+      return;
+    }
     try {
       diagramRunning = true;
-      const file = await ensureActiveFile(apiKey, record, (s) => (status = s));
+      await persistInstructions();
       status = "idle";
       // Re-sample frames so the image model has fresh local reference material.
       const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
-      const diagram = await generateDiagram(apiKey, file, diagramPrompt, frames);
+      const diagram = await generateDiagram(
+        apiKey, record.summary, composePrompt(diagramPrompt, customDiagramInstructions), frames
+      );
       await saveDiagram(record, diagram.image, diagram.costUsd);
       record = await getVideo(id);
       gemStatus = "active";
+      await resolveMediaUrls();
       toast.success("Diagram regenerated.");
     } catch (err) {
       status = "idle";
@@ -377,6 +409,49 @@
         <input type="checkbox" bind:checked={wantHighlights} disabled={running} />
         <Film size={14} /> Detect highlight moments
       </label>
+    </div>
+
+    <div class="instructions">
+      <button
+        type="button"
+        class="instructions-toggle"
+        onclick={() => (instructionsOpen = !instructionsOpen)}
+        aria-expanded={instructionsOpen}
+      >
+        <SlidersHorizontal size={14} />
+        Custom instructions
+        {#if hasInstructions && !instructionsOpen}
+          <span class="instr-badge">active</span>
+        {/if}
+        <span class="chev" class:open={instructionsOpen}><ChevronDown size={14} /></span>
+      </button>
+      {#if instructionsOpen}
+        <div class="instructions-body" transition:fade={{ duration: 120 }}>
+          <label class="instr-field">
+            <span class="instr-label"><Sparkles size={12} /> Summary instructions</span>
+            <textarea
+              rows="3"
+              placeholder="Optional extra guidance for this video, e.g. “Focus on the architecture discussion” or “The presenter is Sarah”…"
+              bind:value={customInstructions}
+              onblur={persistInstructions}
+              disabled={running}
+            ></textarea>
+          </label>
+          <label class="instr-field">
+            <span class="instr-label"><ImageIcon size={12} /> Diagram instructions</span>
+            <textarea
+              rows="3"
+              placeholder="Optional extra guidance for the diagram, e.g. “Show the data flow between the three services”…"
+              bind:value={customDiagramInstructions}
+              onblur={persistInstructions}
+              disabled={running || diagramRunning}
+            ></textarea>
+          </label>
+          <p class="instr-hint">
+            Appended to your default prompts (Settings) for this video only. Saved automatically.
+          </p>
+        </div>
+      {/if}
     </div>
 
     <div class="actions">
@@ -691,6 +766,62 @@
   }
   .mini-spin.dark { border-color: color-mix(in srgb, var(--accent) 30%, transparent); border-top-color: var(--accent); }
   @keyframes spin { to { transform: rotate(360deg); } }
+
+  .instructions { margin-top: 0.6rem; }
+  .instructions-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.86rem;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0.2rem 0;
+  }
+  .instructions-toggle:hover { color: var(--text); }
+  .instructions-toggle :global(svg) { color: var(--accent); }
+  .chev { display: inline-flex; transition: transform 0.15s; }
+  .chev.open { transform: rotate(180deg); }
+  .instr-badge {
+    font-size: 0.68rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--accent);
+  }
+  .instructions-body {
+    margin-top: 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .instr-field { display: flex; flex-direction: column; gap: 0.3rem; }
+  .instr-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+  }
+  .instr-label :global(svg) { color: var(--accent); }
+  .instr-field textarea {
+    width: 100%;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-size: 0.88rem;
+    font-family: inherit;
+    line-height: 1.5;
+    resize: vertical;
+    transition: border-color 0.15s;
+  }
+  .instr-field textarea:focus { outline: none; border-color: var(--accent); }
+  .instr-field textarea:disabled { opacity: 0.6; }
+  .instr-hint { font-size: 0.76rem; color: var(--text-dim); margin: 0; }
 
   .gen-options { display: flex; flex-wrap: wrap; gap: 1rem; margin-top: 0.4rem; }
   .opt {

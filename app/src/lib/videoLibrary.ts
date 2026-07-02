@@ -52,6 +52,11 @@ export interface VideoRecord {
   durationSec: number | null;
   tags: string[];
 
+  /** Optional per-video guidance appended to the base summary prompt. */
+  customInstructions: string | null;
+  /** Optional per-video guidance appended to the base diagram prompt. */
+  customDiagramInstructions: string | null;
+
 
   geminiName: string | null;
   geminiUri: string | null;
@@ -97,6 +102,8 @@ export async function listVideos(): Promise<VideoRecord[]> {
   for (const r of records) {
     if (!Array.isArray(r.tags)) r.tags = [];
     if (!Array.isArray(r.highlights)) r.highlights = [];
+    if (r.customInstructions === undefined) r.customInstructions = null;
+    if (r.customDiagramInstructions === undefined) r.customDiagramInstructions = null;
     if (await migrateRecordMedia(r)) dirty = true;
   }
   if (dirty) await writeAll(records);
@@ -245,6 +252,8 @@ export async function addVideo(sourcePath: string): Promise<VideoRecord> {
     thumbnailPath: null,
     durationSec: null,
     tags: [],
+    customInstructions: null,
+    customDiagramInstructions: null,
     geminiName: null,
     geminiUri: null,
     summary: null,
@@ -321,6 +330,17 @@ export async function saveSummary(
   record.summaryOutputTokens = usage.outputTokens;
   record.summaryCostUsd = usage.costUsd;
   if (highlights) record.highlights = highlights.map(specToHighlight);
+  await upsert(record);
+}
+
+/** Persist per-video custom instructions for summary and diagram prompts. */
+export async function saveCustomInstructions(
+  record: VideoRecord,
+  summary: string | null,
+  diagram: string | null
+): Promise<void> {
+  record.customInstructions = summary?.trim() || null;
+  record.customDiagramInstructions = diagram?.trim() || null;
   await upsert(record);
 }
 

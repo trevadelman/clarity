@@ -31,6 +31,9 @@ Features:
   re-uploads from the local copy and remaps automatically.
 - Drag-and-drop (or click to choose) to add a video.
 - Editable, persisted summary prompt in Settings (with reset-to-default).
+- **Per-video custom instructions** — each video's page has an optional
+  "Custom instructions" panel whose summary/diagram text is appended to the
+  default prompts for that video only (persisted per video).
 - Single summary stored per video (re-summarize overwrites it).
 - Summary rendered as Markdown, with **Copy** and **Export .md**.
 - **Delete** removes the local copy, the stored summary, and the Gemini upload

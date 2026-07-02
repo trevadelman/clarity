@@ -82,6 +82,16 @@ export function estimateCost(
 
 export type Status = "idle" | "uploading" | "processing" | "generating" | "done" | "error";
 
+/**
+ * Compose the effective prompt from a base prompt plus optional per-video
+ * custom instructions. Used for both summary and diagram generation.
+ */
+export function composePrompt(basePrompt: string, extra: string | null): string {
+  const trimmed = extra?.trim();
+  if (!trimmed) return basePrompt;
+  return `${basePrompt}\n\nAdditional instructions for this specific video:\n${trimmed}`;
+}
+
 export interface GeminiFile {
   name: string;
   uri: string;
@@ -310,14 +320,14 @@ export const DEFAULT_DIAGRAM_PROMPT =
   "Output only the image.";
 
 /**
- * Generate a conceptual learning diagram from an already-ACTIVE file using the
- * image model. Optionally include locally-sampled reference frames so the model
- * can match the aesthetic of demonstrated UI without re-ingesting the whole
- * video, and a user-customized prompt.
+ * Generate a conceptual learning diagram with the image model, grounded in the
+ * written summary plus locally-sampled reference frames. The video itself is
+ * NOT sent: the image model rejects audio-bearing input, and the summary
+ * already captures the session's content.
  */
 export async function generateDiagram(
   apiKey: string,
-  file: GeminiFile,
+  summary: string,
   prompt: string = DEFAULT_DIAGRAM_PROMPT,
   frames: { base64: string; mimeType: string }[] = []
 ): Promise<DiagramResult> {
@@ -331,7 +341,7 @@ export async function generateDiagram(
       {
         role: "user",
         parts: [
-          { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
+          { text: `Written summary of the session:\n\n${summary}` },
           ...frameParts,
           { text: prompt },
         ],

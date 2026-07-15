@@ -13,14 +13,15 @@
     Film, Camera, Play, SlidersHorizontal, ChevronDown,
   } from "lucide-svelte";
 
-  import { loadApiKey, loadPrompt, loadDiagramPrompt, loadModel } from "$lib/settings";
+  import { loadApiKey, loadPrompt, loadDiagramPrompt } from "$lib/settings";
   import {
-    DEFAULT_MODEL, type ModelId, type Status, generateSummary, generateDiagram,
+    DEFAULT_MODEL, type Status, generateSummary, generateDiagram,
     composePrompt,
   } from "$lib/gemini";
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
+    isYouTube, parseYouTubeId,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import { captureFrame, sampleFrames } from "$lib/frames";
@@ -35,7 +36,7 @@
   let apiKey = $state("");
   let prompt = $state("");
   let diagramPrompt = $state("");
-  let model = $state<ModelId>(DEFAULT_MODEL);
+  const model = DEFAULT_MODEL;
 
   const DIAGRAM_FRAME_COUNT = 8;
 
@@ -59,24 +60,36 @@
 
 
   const id = $derived($page.params.id ?? "");
+  const isYt = $derived(record ? isYouTube(record) : false);
+  const ytId = $derived(record?.sourceUrl ? parseYouTubeId(record.sourceUrl) : null);
+  // Reactive start offset so "Jump" can reload the embed at a timestamp.
+  let ytStart = $state<number | null>(null);
+  const ytEmbedSrc = $derived(
+    ytId
+      ? `https://www.youtube-nocookie.com/embed/${ytId}${ytStart != null ? `?start=${Math.floor(ytStart)}&autoplay=1` : ""}`
+      : ""
+  );
 
   const running = $derived(
     status === "uploading" || status === "processing" || status === "generating"
   );
   const summaryHtml = $derived(record?.summary ? marked.parse(record.summary) : "");
-  const videoSrc = $derived(record ? convertFileSrc(record.localPath) : "");
+  const videoSrc = $derived(record?.localPath ? convertFileSrc(record.localPath) : "");
 
 
-  const steps = [
+  const allSteps = [
     { key: "uploading", label: "Upload" },
     { key: "processing", label: "Process" },
     { key: "generating", label: "Generate" },
   ];
+  // YouTube sources skip the upload/process phases entirely.
+  const steps = $derived(isYt ? allSteps.slice(2) : allSteps);
   const stepIndex = $derived.by(() => {
-    if (status === "uploading") return 0;
-    if (status === "processing") return 1;
-    if (status === "generating") return 2;
-    if (status === "done") return 3;
+    const offset = isYt ? 2 : 0;
+    if (status === "uploading") return 0 - offset;
+    if (status === "processing") return 1 - offset;
+    if (status === "generating") return 2 - offset;
+    if (status === "done") return steps.length;
     return -1;
   });
 
@@ -84,15 +97,20 @@
     apiKey = await loadApiKey();
     prompt = await loadPrompt();
     diagramPrompt = await loadDiagramPrompt();
-    model = await loadModel();
     record = await getVideo(id);
     customInstructions = record?.customInstructions ?? "";
     customDiagramInstructions = record?.customDiagramInstructions ?? "";
     loaded = true;
-    gemStatus = record && apiKey ? await checkGeminiStatus(apiKey, record) : "missing";
+    gemStatus =
+      record && apiKey && !isYouTube(record)
+        ? await checkGeminiStatus(apiKey, record)
+        : "missing";
     // Auto-render any highlights still missing their local media (e.g. captured
     // on an older build or interrupted mid-run). This costs only compute.
-    if (record?.highlights.some((h) => !h.mediaPath)) await renderAllHighlights();
+    // YouTube sources have no local file to capture frames from.
+    if (record && !isYouTube(record) && record.highlights.some((h) => !h.mediaPath)) {
+      await renderAllHighlights();
+    }
     await resolveMediaUrls();
   });
 
@@ -142,7 +160,8 @@
         diagramRunning = true;
         // Sample real frames locally so the image model can match demonstrated
         // UI aesthetics without re-ingesting (and re-billing) the whole video.
-        const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
+        // YouTube sources have no local file — the summary alone grounds it.
+        const frames = isYt ? [] : await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
         const diagram = await generateDiagram(
           apiKey, text, composePrompt(diagramPrompt, customDiagramInstructions), frames
         );
@@ -156,7 +175,8 @@
       toast.success("Summary ready.");
       // Highlight images are captured locally (no API cost), so render them
       // automatically rather than making the user click each one.
-      if (wantHighlights) await renderAllHighlights();
+      if (wantHighlights && !isYt) await renderAllHighlights();
+      await resolveMediaUrls();
     } catch (err) {
       status = "error";
       diagramRunning = false;
@@ -179,7 +199,7 @@
       await persistInstructions();
       status = "idle";
       // Re-sample frames so the image model has fresh local reference material.
-      const frames = await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
+      const frames = isYt ? [] : await sampleFrames(record.localPath, DIAGRAM_FRAME_COUNT);
       const diagram = await generateDiagram(
         apiKey, record.summary, composePrompt(diagramPrompt, customDiagramInstructions), frames
       );
@@ -197,7 +217,13 @@
   }
 
   function seekPlayer(sec: number | null) {
-    if (playerEl && sec != null) {
+    if (sec == null) return;
+    if (isYt) {
+      // Reload the embed at the timestamp; the iframe API isn't wired up.
+      ytStart = sec;
+      return;
+    }
+    if (playerEl) {
       playerEl.currentTime = sec;
       playerEl.play().catch(() => {});
       playerEl.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -342,18 +368,37 @@
   </header>
 
   <div class="player card">
-    <!-- svelte-ignore a11y_media_has_caption -->
-    <video bind:this={playerEl} src={videoSrc} controls preload="metadata"></video>
+    {#if isYt}
+      <iframe
+        class="yt-embed"
+        src={ytEmbedSrc}
+        title={record.videoName}
+        frameborder="0"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowfullscreen
+      ></iframe>
+    {:else}
+      <!-- svelte-ignore a11y_media_has_caption -->
+      <video bind:this={playerEl} src={videoSrc} controls preload="metadata"></video>
+    {/if}
   </div>
 
   <section class="card">
     <div class="info-row">
       <div class="meta-row">
-        <span>{fmtSize(record.sizeBytes)}</span>
-        {#if formatDuration(record.durationSec)}<span>· {formatDuration(record.durationSec)}</span>{/if}
-        <span>· {record.mimeType}</span>
+        {#if isYt}
+          <a class="yt-link" href={record.sourceUrl} target="_blank" rel="noreferrer">
+            {record.sourceUrl}
+          </a>
+        {:else}
+          <span>{fmtSize(record.sizeBytes)}</span>
+          {#if formatDuration(record.durationSec)}<span>· {formatDuration(record.durationSec)}</span>{/if}
+          <span>· {record.mimeType}</span>
+        {/if}
       </div>
-      {#if gemStatus === "checking"}
+      {#if isYt}
+        <span class="badge gem-ok"><CircleCheck size={13} /> YouTube source</span>
+      {:else if gemStatus === "checking"}
         <span class="badge"><Cloud size={13} /> Checking Gemini…</span>
       {:else if gemStatus === "active"}
         <span class="badge gem-ok"><CircleCheck size={13} /> On Gemini</span>
@@ -523,9 +568,13 @@
       <div class="summary-head">
         <h2><Film size={16} /> Highlights</h2>
       </div>
+      {#if isYt}
+        <p class="hl-note">Screenshots aren't available for YouTube videos — use Jump to view each moment in the player.</p>
+      {/if}
       <div class="highlight-grid">
         {#each record.highlights as h (h.id)}
           <div class="highlight">
+            {#if !isYt}
             <button
               type="button"
               class="hl-media"
@@ -539,6 +588,7 @@
               {/if}
               <span class="hl-kind"><Camera size={11} /> Frame</span>
             </button>
+            {/if}
             <div class="hl-body">
               <div class="hl-label">{h.label}</div>
               <div class="hl-time">{fmtTime(h.atSec)}</div>
@@ -547,7 +597,7 @@
 
                   <Play size={12} /> Jump
                 </button>
-                {#if h.mediaPath}
+                {#if h.mediaPath && !isYt}
                   <button class="btn small-btn" onclick={() => exportHighlight(h)}>
                     <Download size={12} /> Save
                   </button>
@@ -616,6 +666,10 @@
   }
   .player { padding: 0; overflow: hidden; }
   .player video { width: 100%; display: block; max-height: 420px; background: #000; }
+  .yt-embed { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; border: none; }
+
+  .yt-link { color: var(--accent); text-decoration: none; word-break: break-all; }
+  .yt-link:hover { text-decoration: underline; }
 
   .meta-row { font-size: 0.82rem; color: var(--text-dim); display: flex; gap: 0.35rem; flex-wrap: wrap; }
   .meta-row.mono { font-family: "JetBrains Mono", monospace; margin-top: 0.4rem; }
@@ -927,6 +981,7 @@
     background: rgba(0, 0, 0, 0.6);
     color: #fff;
   }
+  .hl-note { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--text-dim); }
   .hl-body { padding: 0.55rem 0.65rem 0.65rem; display: flex; flex-direction: column; gap: 0.3rem; }
   .hl-label { font-size: 0.84rem; font-weight: 500; line-height: 1.3; }
   .hl-time { font-size: 0.72rem; color: var(--text-dim); font-family: "JetBrains Mono", monospace; }

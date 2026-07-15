@@ -22,7 +22,7 @@ export const DEFAULT_PROMPT =
   "Use the spoken audio as the primary source and the visuals as supporting " +
   "detail. Prefer completeness over conciseness.";
 
-export type ModelId = "gemini-2.5-flash" | "gemini-2.5-pro";
+export type ModelId = "gemini-3.5-flash";
 
 /** Image model used for diagram generation (separate from the text models). */
 export const IMAGE_MODEL = "gemini-3.1-flash-image";
@@ -41,25 +41,19 @@ export interface ModelInfo {
 
 
 /**
- * Published per-1M-token rates (USD) as of 2025. Easy to update if Google
- * changes pricing. Pro uses its <=200k-token input tier.
+ * The app always uses the flagship flash model. Published per-1M-token rates
+ * (USD) — easy to update if Google changes pricing.
  */
 export const MODELS: Record<ModelId, ModelInfo> = {
-  "gemini-2.5-flash": {
-    id: "gemini-2.5-flash",
-    label: "Gemini 2.5 Flash",
+  "gemini-3.5-flash": {
+    id: "gemini-3.5-flash",
+    label: "Gemini 3.5 Flash",
     inputPerM: 0.3,
     outputPerM: 2.5,
   },
-  "gemini-2.5-pro": {
-    id: "gemini-2.5-pro",
-    label: "Gemini 2.5 Pro",
-    inputPerM: 1.25,
-    outputPerM: 10.0,
-  },
 };
 
-export const DEFAULT_MODEL: ModelId = "gemini-2.5-flash";
+export const DEFAULT_MODEL: ModelId = "gemini-3.5-flash";
 
 export interface TokenUsage {
   inputTokens: number;
@@ -252,16 +246,19 @@ export async function generateSummary(
     ? { responseMimeType: "application/json", responseSchema: SUMMARY_SCHEMA as object }
     : undefined;
 
+  // YouTube sources are referenced by URL alone; File API uploads carry a
+  // mimeType. Omit an empty mimeType so the API accepts the URL form.
+  const fileData = file.mimeType
+    ? { fileUri: file.uri, mimeType: file.mimeType }
+    : { fileUri: file.uri };
+
   const response = await ai.models.generateContent({
     model,
     config,
     contents: [
       {
         role: "user",
-        parts: [
-          { fileData: { fileUri: file.uri, mimeType: file.mimeType } },
-          { text: promptText },
-        ],
+        parts: [{ fileData }, { text: promptText }],
       },
     ],
   });

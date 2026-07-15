@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/stores";
-  import { Library, Plus, Settings, Moon, Sun, Video, Download, X } from "lucide-svelte";
+  import { getVersion } from "@tauri-apps/api/app";
+  import {
+    Library, Plus, Settings, Moon, Sun, Video, Download, X,
+    PanelLeftClose, PanelLeftOpen, ChevronDown,
+  } from "lucide-svelte";
+  import { marked } from "marked";
   import { theme, toggleTheme, initTheme } from "$lib/theme";
   import { checkForUpdate, installUpdate, isVersionDismissed, dismissVersion, type UpdateInfo } from "$lib/updates";
   import { toast } from "$lib/toast";
@@ -15,10 +20,22 @@
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 
+  const COLLAPSE_KEY = "sidebarCollapsed";
+
   let update = $state<UpdateInfo | null>(null);
-  let collapsed = $state(true);
+  let collapsed = $state(
+    typeof localStorage !== "undefined" && localStorage.getItem(COLLAPSE_KEY) !== "0"
+  );
   let installing = $state(false);
   let progressPct = $state<number | null>(null);
+  let version = $state("");
+  let notesOpen = $state(false);
+  const notesHtml = $derived(update?.notes ? marked.parse(update.notes) : "");
+
+  function toggleCollapsed() {
+    collapsed = !collapsed;
+    localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+  }
 
   function isActive(href: string, path: string): boolean {
     return href === "/" ? path === "/" : path.startsWith(href);
@@ -46,6 +63,7 @@
 
   onMount(async () => {
     initTheme();
+    version = await getVersion();
     const info = await checkForUpdate();
     if (info && !(await isVersionDismissed(info.version))) update = info;
   });
@@ -65,7 +83,16 @@
       <button class="update-dl" onclick={install}>
         <Download size={14} /> Install &amp; Restart
       </button>
+      {#if update.notes}
+        <button class="update-notes-toggle" onclick={() => (notesOpen = !notesOpen)}>
+          What's new
+          <span class="update-chev" class:open={notesOpen}><ChevronDown size={13} /></span>
+        </button>
+      {/if}
       <button class="update-x" onclick={dismiss} aria-label="Dismiss"><X size={14} /></button>
+    {/if}
+    {#if notesOpen && !installing && notesHtml}
+      <div class="update-notes markdown">{@html notesHtml}</div>
     {/if}
   </div>
 {/if}
@@ -73,10 +100,10 @@
 
 <div class="app">
   <nav class="sidebar" class:collapsed>
-    <button class="brand" onclick={() => (collapsed = !collapsed)} title="Toggle sidebar">
+    <a class="brand" href="/" title="Clarity — Library">
       <span class="logo"><Video size={18} /></span>
       <span class="brand-text"><strong>Clarity</strong><br />Make It Make Sense</span>
-    </button>
+    </a>
 
     <div class="links">
       {#each links as l (l.href)}
@@ -93,13 +120,28 @@
     </div>
 
     <div class="bottom-row">
-      <button class="icon-btn" onclick={toggleTheme} aria-label="Toggle theme">
+      <button class="icon-btn" onclick={toggleTheme} aria-label="Toggle theme" title="Toggle theme">
         {#if $theme === "dark"}
           <Sun size={16} />
         {:else}
           <Moon size={16} />
         {/if}
       </button>
+      <button
+        class="icon-btn"
+        onclick={toggleCollapsed}
+        aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {#if collapsed}
+          <PanelLeftOpen size={16} />
+        {:else}
+          <PanelLeftClose size={16} />
+        {/if}
+      </button>
+      {#if version && !collapsed}
+        <a class="version-link" href="/settings" title="About & updates">v{version}</a>
+      {/if}
     </div>
   </nav>
 
@@ -112,38 +154,54 @@
 
 <style>
   :global(:root) {
+    /* Defaults for the instant before initTheme() sets data-theme. */
     --accent: #6d5efc;
     --accent-hover: #5b4cf0;
-    --ok: #18a957;
-    --danger: #e5484d;
-    --warn: #d98818;
     --radius: 12px;
     --radius-sm: 8px;
     --font: "Inter", -apple-system, system-ui, sans-serif;
+    /* The sidebar rail is always dark, regardless of theme. */
+    --sidebar-bg: #131318;
+    --sidebar-text: #b3b3c0;
+    --sidebar-text-dim: #b9b9c6;
+    --sidebar-text-bright: #ffffff;
+    --sidebar-hover: rgba(255, 255, 255, 0.06);
+    --sidebar-border: rgba(255, 255, 255, 0.08);
   }
   :global(html[data-theme="light"]) {
+    --accent: #6d5efc;
+    --accent-hover: #5b4cf0;
+    --ok: #148549;
+    --danger: #d93840;
+    --warn: #a96400;
     --bg: #f4f4f7;
     --surface: #ffffff;
     --surface-2: #ffffff;
     --text: #1a1a1f;
-    --text-dim: #6b6b76;
+    --text-dim: #62626e;
     --border: #e4e4ea;
     --hover: #f0f0f3;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
     --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.12);
-    --sidebar-bg: #16161c;
   }
   :global(html[data-theme="dark"]) {
+    /* Lighter accent in dark mode: #6d5efc as text on dark surfaces falls
+       under 4.5:1, so links/labels get a brighter tint while buttons keep
+       enough weight against white label text. */
+    --accent: #8a7dff;
+    --accent-hover: #9c91ff;
+    --ok: #34c374;
+    --danger: #f2555a;
+    --warn: #e8a33d;
     --bg: #0c0c10;
     --surface: #15151b;
     --surface-2: #1c1c24;
     --text: #ececf1;
-    --text-dim: #9b9ba6;
+    --text-dim: #a6a6b2;
     --border: #262630;
     --hover: #22222c;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.55);
-    --sidebar-bg: #101015;
   }
   :global(body) {
     margin: 0;
@@ -151,8 +209,14 @@
     background: var(--bg);
     color: var(--text);
     -webkit-font-smoothing: antialiased;
+    transition: background-color 0.2s ease, color 0.2s ease;
   }
   :global(*) { box-sizing: border-box; }
+  /* Keyboard users get a consistent, visible focus ring everywhere. */
+  :global(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
 
   /* Transparent draggable strip overlaying the top so content can bleed
      beneath the (hidden) titlebar while the window stays movable. */
@@ -183,13 +247,6 @@
     color: #fff;
     font-size: 0.85rem;
   }
-  .update-bar code {
-    font-family: "JetBrains Mono", monospace;
-    font-size: 0.72rem;
-    background: rgba(0, 0, 0, 0.22);
-    padding: 0.15rem 0.4rem;
-    border-radius: 5px;
-  }
   .update-dl {
     display: inline-flex;
     align-items: center;
@@ -217,13 +274,53 @@
     border-radius: 5px;
   }
   .update-x:hover { opacity: 1; background: rgba(255, 255, 255, 0.18); }
+  .update-notes-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border: none;
+    background: transparent;
+    color: #fff;
+    opacity: 0.85;
+    padding: 0.3rem 0.4rem;
+    border-radius: 6px;
+    font-size: 0.82rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .update-notes-toggle:hover { opacity: 1; background: rgba(255, 255, 255, 0.14); }
+  .update-chev { display: inline-flex; transition: transform 0.15s; }
+  .update-chev.open { transform: rotate(180deg); }
+  .update-notes {
+    flex-basis: 100%;
+    max-height: 220px;
+    overflow-y: auto;
+    background: rgba(0, 0, 0, 0.18);
+    border-radius: var(--radius-sm);
+    padding: 0.6rem 0.85rem;
+    font-size: 0.82rem;
+    line-height: 1.55;
+  }
+  .update-notes :global(h1),
+  .update-notes :global(h2),
+  .update-notes :global(h3) { margin: 0.4rem 0 0.2rem; font-size: 0.88rem; }
+  .update-notes :global(p) { margin: 0.25rem 0; }
+  .update-notes :global(ul) { margin: 0.25rem 0; padding-left: 1.2rem; }
+  .update-notes :global(li) { margin: 0.15rem 0; }
+  .update-notes :global(code) {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.74rem;
+    background: rgba(0, 0, 0, 0.25);
+    padding: 0.1rem 0.35rem;
+    border-radius: 4px;
+  }
 
   .app { display: flex; align-items: flex-start; min-height: 100vh; }
   .sidebar {
-    width: 210px;
+    width: 220px;
     flex-shrink: 0;
     background: var(--sidebar-bg);
-    color: #e6e6ee;
+    color: var(--sidebar-text);
     padding: 2.5rem 0.9rem 1.25rem;
     display: flex;
     flex-direction: column;
@@ -244,19 +341,16 @@
   .sidebar.collapsed .brand-text,
   .sidebar.collapsed .link-label { display: none; }
   .sidebar.collapsed .brand { justify-content: center; padding-left: 0; padding-right: 0; }
-  .sidebar.collapsed a { justify-content: center; padding-left: 0; padding-right: 0; }
-  .sidebar.collapsed .bottom-row { flex-direction: column; }
+  .sidebar.collapsed .links a { justify-content: center; padding-left: 0; padding-right: 0; }
+  .sidebar.collapsed .bottom-row { flex-direction: column; align-items: center; }
   .brand {
     display: flex;
     align-items: center;
     gap: 0.6rem;
     padding: 0.2rem 0.4rem 1.1rem;
-    border: none;
-    background: transparent;
     color: inherit;
-    font-family: inherit;
+    text-decoration: none;
     text-align: left;
-    cursor: pointer;
     width: 100%;
   }
   .brand:hover .logo { filter: brightness(1.1); }
@@ -270,15 +364,15 @@
     color: #fff;
     flex-shrink: 0;
   }
-  .brand-text { font-size: 0.82rem; line-height: 1.2; color: #b9b9c6; white-space: nowrap; }
-  .brand-text strong { color: #fff; font-size: 0.95rem; }
+  .brand-text { font-size: 0.82rem; line-height: 1.2; color: var(--sidebar-text-dim); white-space: nowrap; }
+  .brand-text strong { color: var(--sidebar-text-bright); font-size: 0.95rem; }
 
   .links { display: flex; flex-direction: column; gap: 0.2rem; }
-  .sidebar a {
+  .links a {
     display: flex;
     align-items: center;
     gap: 0.6rem;
-    color: #b3b3c0;
+    color: var(--sidebar-text);
     text-decoration: none;
     padding: 0.55rem 0.7rem;
     border-radius: var(--radius-sm);
@@ -286,9 +380,9 @@
     position: relative;
     transition: background 0.15s, color 0.15s;
   }
-  .sidebar a:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
-  .sidebar a.active { background: rgba(109, 94, 252, 0.16); color: #fff; }
-  .sidebar a.active::before {
+  .links a:hover { background: var(--sidebar-hover); color: var(--sidebar-text-bright); }
+  .links a.active { background: rgba(109, 94, 252, 0.16); color: var(--sidebar-text-bright); }
+  .links a.active::before {
     content: "";
     position: absolute;
     left: -0.9rem;
@@ -300,21 +394,32 @@
     background: var(--accent);
   }
 
-  .bottom-row { margin-top: auto; display: flex; gap: 0.4rem; }
+  .bottom-row { margin-top: auto; display: flex; align-items: center; gap: 0.4rem; }
   .icon-btn {
     display: grid;
     place-items: center;
     width: 34px;
     height: 34px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--sidebar-border);
     border-radius: var(--radius-sm);
     background: transparent;
-    color: #b3b3c0;
+    color: var(--sidebar-text);
     cursor: pointer;
     font-family: inherit;
     transition: background 0.15s, color 0.15s;
   }
-  .icon-btn:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
+  .icon-btn:hover { background: var(--sidebar-hover); color: var(--sidebar-text-bright); }
+  .version-link {
+    margin-left: auto;
+    color: var(--sidebar-text);
+    text-decoration: none;
+    font-size: 0.72rem;
+    font-family: "JetBrains Mono", monospace;
+    opacity: 0.7;
+    padding: 0.2rem 0.3rem;
+    border-radius: 5px;
+  }
+  .version-link:hover { opacity: 1; color: var(--sidebar-text-bright); }
 
   .content { flex: 1; min-width: 0; padding: 2.75rem 2.25rem 2rem; }
 </style>

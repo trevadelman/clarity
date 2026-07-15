@@ -40,9 +40,16 @@ export interface Highlight {
 
 
 
+export type SourceType = "local" | "youtube";
+
 export interface VideoRecord {
   id: string;
   videoName: string;
+  /** Where the video lives. Absent on legacy records ⇒ "local". */
+  sourceType?: SourceType;
+  /** Original YouTube URL for `sourceType === "youtube"` records. */
+  sourceUrl?: string | null;
+  /** Absolute path of the local copy. Empty string for YouTube records. */
   localPath: string;
   mimeType: string;
   sizeBytes: number;
@@ -104,6 +111,8 @@ export async function listVideos(): Promise<VideoRecord[]> {
     if (!Array.isArray(r.highlights)) r.highlights = [];
     if (r.customInstructions === undefined) r.customInstructions = null;
     if (r.customDiagramInstructions === undefined) r.customDiagramInstructions = null;
+    if (r.sourceType === undefined) r.sourceType = "local";
+    if (r.sourceUrl === undefined) r.sourceUrl = null;
     if (await migrateRecordMedia(r)) dirty = true;
   }
   if (dirty) await writeAll(records);
@@ -224,6 +233,110 @@ const MIME_BY_EXT: Record<string, string> = {
   webm: "video/webm",
 };
 
+/** True if the record's video came from a YouTube URL rather than a file. */
+export function isYouTube(record: VideoRecord): boolean {
+  return record.sourceType === "youtube";
+}
+
+/**
+ * Extract the 11-character YouTube video ID from a URL, or null if the URL
+ * isn't a recognizable YouTube video link. Accepts watch, youtu.be, shorts,
+ * live, and embed forms.
+ */
+export function parseYouTubeId(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\.|^m\./, "");
+  const idOk = (id: string | null | undefined) =>
+    id && /^[\w-]{11}$/.test(id) ? id : null;
+  if (host === "youtu.be") return idOk(u.pathname.slice(1).split("/")[0]);
+  if (host === "youtube.com" || host === "youtube-nocookie.com") {
+    if (u.pathname === "/watch") return idOk(u.searchParams.get("v"));
+    const m = u.pathname.match(/^\/(shorts|live|embed)\/([\w-]{11})/);
+    if (m) return idOk(m[2]);
+  }
+  return null;
+}
+
+/** Add a YouTube video by URL: fetch its thumbnail and create a record. */
+export async function addYouTubeVideo(url: string): Promise<VideoRecord> {
+  const videoId = parseYouTubeId(url);
+  if (!videoId) throw new Error("That doesn't look like a valid YouTube video link.");
+
+  const id = crypto.randomUUID();
+  const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+  // Best-effort title: YouTube's oEmbed endpoint needs no API key. Fall back
+  // to the canonical URL if offline or the video is private.
+  let videoName = canonicalUrl;
+  try {
+    const res = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(canonicalUrl)}&format=json`
+    );
+    if (res.ok) {
+      const meta = (await res.json()) as { title?: string };
+      if (meta.title?.trim()) videoName = meta.title.trim();
+    }
+  } catch {
+    // offline or blocked; keep the URL as the name
+  }
+
+  // Best-effort poster: YouTube serves a predictable thumbnail per video ID.
+  let thumbnailPath: string | null = null;
+  try {
+    const res = await fetch(`https://img.youtube.com/vi/${videoId}/hqdefault.jpg`);
+    if (res.ok) {
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      thumbnailPath = await saveMedia(id, "thumbnail.jpg", bytes);
+    }
+  } catch {
+    // offline or blocked; the card just shows the fallback icon
+  }
+
+  const record: VideoRecord = {
+    id,
+    videoName,
+    sourceType: "youtube",
+    sourceUrl: canonicalUrl,
+    localPath: "",
+    mimeType: "video/youtube",
+    sizeBytes: 0,
+    addedAt: new Date().toISOString(),
+    thumbnailPath,
+    durationSec: null,
+    tags: [],
+    customInstructions: null,
+    customDiagramInstructions: null,
+    geminiName: null,
+    geminiUri: canonicalUrl,
+    summary: null,
+    summaryPrompt: null,
+    summaryModel: null,
+    summarizedAt: null,
+    summaryInputTokens: null,
+    summaryOutputTokens: null,
+    summaryCostUsd: null,
+    diagramPath: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
+  };
+  await upsert(record);
+  return record;
+}
+
+/** Rename a record (e.g. give a YouTube video a friendly title). */
+export async function renameVideo(record: VideoRecord, name: string): Promise<void> {
+  const clean = name.trim();
+  if (!clean) return;
+  record.videoName = clean;
+  await upsert(record);
+}
+
 export function mimeForName(name: string): string {
   const ext = (name.split(".").pop() ?? "mp4").toLowerCase();
   return MIME_BY_EXT[ext] ?? "video/mp4";
@@ -294,6 +407,16 @@ export async function ensureActiveFile(
   record: VideoRecord,
   onStatus: (s: Status) => void
 ): Promise<GeminiFile> {
+  if (isYouTube(record)) {
+    // YouTube sources are referenced by URL directly — nothing to upload.
+    return {
+      name: "",
+      uri: record.sourceUrl ?? record.geminiUri ?? "",
+      mimeType: "",
+      displayName: record.videoName,
+      state: "ACTIVE",
+    };
+  }
   if (record.geminiName) {
     const existing = await getFileState(apiKey, record.geminiName);
     if (existing && existing.state === "ACTIVE") return existing;
@@ -407,7 +530,7 @@ export async function clearAll(apiKey: string): Promise<void> {
         // already gone on Gemini's side; ignore
       }
     }
-    if (await exists(record.localPath)) await remove(record.localPath);
+    if (record.localPath && (await exists(record.localPath))) await remove(record.localPath);
     await removeMediaDir(record.id);
   }
   await writeAll([]);
@@ -423,7 +546,7 @@ export async function deleteVideo(apiKey: string, record: VideoRecord): Promise<
       // file may already be expired/gone on Gemini's side; ignore
     }
   }
-  if (await exists(record.localPath)) await remove(record.localPath);
+  if (record.localPath && (await exists(record.localPath))) await remove(record.localPath);
   await removeMediaDir(record.id);
   const records = await readAll();
   await writeAll(records.filter((r) => r.id !== record.id));

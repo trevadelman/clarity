@@ -4,8 +4,8 @@
   import { goto } from "$app/navigation";
   import { open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { UploadCloud, Film } from "lucide-svelte";
-  import { addVideo, setThumbnail } from "$lib/videoLibrary";
+  import { UploadCloud, Film, Link } from "lucide-svelte";
+  import { addVideo, addYouTubeVideo, parseYouTubeId, setThumbnail } from "$lib/videoLibrary";
   import { probeVideo } from "$lib/thumbnail";
   import { toast } from "$lib/toast";
 
@@ -14,6 +14,10 @@
   let dragOver = $state(false);
   let busy = $state(false);
   let stage = $state("");
+  let ytUrl = $state("");
+  let ytBusy = $state(false);
+
+  const ytValid = $derived(parseYouTubeId(ytUrl) !== null);
 
   let unlistenDrop: (() => void) | null = null;
 
@@ -56,6 +60,19 @@
     }
   }
 
+  async function handleAddYouTube() {
+    if (!ytValid || ytBusy) return;
+    ytBusy = true;
+    try {
+      const record = await addYouTubeVideo(ytUrl);
+      toast.success("YouTube video added to your library.");
+      await goto(`/video/${record.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+      ytBusy = false;
+    }
+  }
+
   async function handleChoose() {
     const selected = await open({
       multiple: false,
@@ -90,12 +107,30 @@
   {/if}
 </button>
 
+<div class="or-divider"><span>or</span></div>
+
+<form class="yt-row" onsubmit={(e) => { e.preventDefault(); handleAddYouTube(); }}>
+  <span class="yt-icon"><Link size={18} /></span>
+  <input
+    type="url"
+    placeholder="Paste a YouTube link… (public videos only)"
+    bind:value={ytUrl}
+    disabled={ytBusy}
+  />
+  <button type="submit" class="yt-btn" disabled={!ytValid || ytBusy}>
+    {#if ytBusy}<span class="mini-spin"></span> Adding…{:else}Add{/if}
+  </button>
+</form>
+{#if ytUrl.trim() && !ytValid}
+  <p class="yt-hint">Enter a full YouTube video URL, e.g. https://www.youtube.com/watch?v=…</p>
+{/if}
+
 <div class="info" in:fade>
   <Film size={16} />
   <p>
-    The video is copied into the app's local library. It's uploaded to Gemini
-    only when you summarize it, and re-uploaded automatically if that upload
-    later expires.
+    Local files are copied into the app's library and uploaded to Gemini only
+    when you summarize them. YouTube videos are analyzed straight from their
+    URL — nothing is downloaded or uploaded.
   </p>
 </div>
 
@@ -145,6 +180,70 @@
   }
   .info :global(svg) { color: var(--accent); flex-shrink: 0; margin-top: 2px; }
   .info p { margin: 0; line-height: 1.5; }
+
+  .or-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 1.1rem 0;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+  }
+  .or-divider::before,
+  .or-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  .yt-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    transition: border-color 0.15s;
+  }
+  .yt-row:focus-within { border-color: var(--accent); }
+  .yt-icon { color: #ff0033; display: inline-flex; flex-shrink: 0; }
+  .yt-row input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 0.92rem;
+    font-family: inherit;
+    outline: none;
+  }
+  .yt-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.95rem;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent);
+    color: #fff;
+    font-size: 0.88rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.15s, opacity 0.15s;
+  }
+  .yt-btn:hover:not(:disabled) { background: var(--accent-hover); }
+  .yt-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .yt-hint { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--text-dim); }
+
+  .mini-spin {
+    width: 13px;
+    height: 13px;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
 
   .spinner {
     width: 30px;

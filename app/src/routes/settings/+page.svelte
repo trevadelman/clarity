@@ -1,29 +1,25 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, Cpu, RefreshCw } from "lucide-svelte";
+  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw } from "lucide-svelte";
   import {
     loadApiKey, saveApiKey, loadPrompt, savePrompt,
-    loadDiagramPrompt, saveDiagramPrompt, loadModel, saveModel,
+    loadDiagramPrompt, saveDiagramPrompt,
   } from "$lib/settings";
-  import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT, DEFAULT_MODEL, MODELS, type ModelId } from "$lib/gemini";
+  import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "$lib/gemini";
   import { checkForUpdate, installUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
 
   let apiKey = $state("");
   let prompt = $state(DEFAULT_PROMPT);
   let diagramPrompt = $state(DEFAULT_DIAGRAM_PROMPT);
-  let model = $state<ModelId>(DEFAULT_MODEL);
   let version = $state("");
   let checking = $state(false);
-
-  const modelList = Object.values(MODELS);
 
   onMount(async () => {
     apiKey = await loadApiKey();
     prompt = await loadPrompt();
     diagramPrompt = await loadDiagramPrompt();
-    model = await loadModel();
     version = await getVersion();
   });
 
@@ -43,12 +39,6 @@
     } finally {
       checking = false;
     }
-  }
-
-  async function handleSaveModel(next: ModelId) {
-    model = next;
-    await saveModel(next);
-    toast.success(`Model set to ${MODELS[next].label}.`);
   }
 
   async function handleSaveKey() {
@@ -93,23 +83,6 @@
     </button>
   </div>
   <p class="hint">Stored locally via plugin-store. Never bundled or committed.</p>
-</section>
-
-<section class="card">
-  <div class="card-head"><Cpu size={17} /><h2>Model</h2></div>
-  <div class="models">
-    {#each modelList as m (m.id)}
-      <button
-        class="model"
-        class:selected={model === m.id}
-        onclick={() => handleSaveModel(m.id)}
-      >
-        <span class="model-name">{m.label}</span>
-        <span class="model-price">${m.inputPerM}/M in · ${m.outputPerM}/M out</span>
-      </button>
-    {/each}
-  </div>
-  <p class="hint">Flash is fast and cheap; Pro is higher quality at higher cost. Cost is estimated per summary.</p>
 </section>
 
 <section class="card">
@@ -201,28 +174,4 @@
 
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0.6rem 0 0; }
   .version { font-size: 0.92rem; font-weight: 500; flex: 1; }
-
-
-  .models { display: flex; gap: 0.6rem; flex-wrap: wrap; }
-  .model {
-    flex: 1;
-    min-width: 180px;
-    display: flex;
-    flex-direction: column;
-    gap: 0.3rem;
-    align-items: flex-start;
-    padding: 0.75rem 0.9rem;
-    border: 1.5px solid var(--border);
-    border-radius: var(--radius-sm);
-    background: var(--bg);
-    color: var(--text);
-    cursor: pointer;
-    font-family: inherit;
-    text-align: left;
-    transition: border-color 0.15s, background 0.15s;
-  }
-  .model:hover { background: var(--hover); }
-  .model.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
-  .model-name { font-size: 0.95rem; font-weight: 600; }
-  .model-price { font-size: 0.78rem; color: var(--text-dim); font-family: "JetBrains Mono", monospace; }
 </style>

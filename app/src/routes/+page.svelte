@@ -3,7 +3,7 @@
   import { fly, fade } from "svelte/transition";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X } from "lucide-svelte";
-  import { listVideos, listAllTags, clearAll, type VideoRecord } from "$lib/videoLibrary";
+  import { listVideos, listAllTags, clearAll, isYouTube, type VideoRecord } from "$lib/videoLibrary";
   import { formatDuration } from "$lib/thumbnail";
   import { mediaSrc } from "$lib/media";
   import { loadApiKey } from "$lib/settings";
@@ -168,7 +168,9 @@
           </div>
           <div class="body">
             <div class="title">{v.videoName}</div>
-            <div class="meta">{fmtSize(v.sizeBytes)} · {relTime(v.addedAt)}</div>
+            <div class="meta">
+              {isYouTube(v) ? "YouTube" : fmtSize(v.sizeBytes)} · {relTime(v.addedAt)}
+            </div>
             {#if v.tags && v.tags.length > 0}
               <div class="card-tags">
                 {#each v.tags as t (t)}
@@ -182,7 +184,9 @@
               {:else}
                 <span class="badge">Not summarized</span>
               {/if}
-              {#if v.geminiName}
+              {#if isYouTube(v)}
+                <span class="badge yt">YouTube</span>
+              {:else if v.geminiName}
                 <span class="badge gem"><Cloud size={12} /> On Gemini</span>
               {:else}
                 <span class="badge">Local only</span>
@@ -368,6 +372,7 @@
   }
   .badge.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .badge.gem { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+  .badge.yt { background: color-mix(in srgb, #ff0033 14%, transparent); color: #e5254c; }
 
   .skeleton {
     aspect-ratio: 16 / 9;

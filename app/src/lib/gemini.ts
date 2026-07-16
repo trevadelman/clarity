@@ -357,6 +357,164 @@ export async function generateDiagram(
   throw new Error("No diagram image returned from Gemini.");
 }
 
+/** One turn in a stored chat thread. */
+export interface ChatMessage {
+  role: "user" | "model";
+  text: string;
+  /** ISO timestamp when the message was created. */
+  at: string;
+  /** Cost of producing this model message (user messages: undefined). */
+  costUsd?: number;
+}
+
+const CHAT_SYSTEM_PROMPT =
+  "You are a helpful assistant answering questions about a specific video. " +
+  "Prefer grounding answers in the provided video context. When you reference " +
+  "a moment in the video, include its timestamp in the exact form [mm:ss] or " +
+  "[h:mm:ss] so the app can link it.\n\n" +
+  "You MAY draw on your general knowledge to answer questions that go beyond " +
+  "the video (comparisons, alternatives, background, 'what would X look " +
+  "like'), and you should do so willingly — but clearly mark that shift, e.g. " +
+  "by prefacing with 'Beyond the video:' or noting 'the video doesn't cover " +
+  "this, but…'. Never present general knowledge as something said in the " +
+  "video. Keep answers concise and use Markdown.";
+
+export interface ChatReply {
+  text: string;
+  usage: TokenUsage;
+}
+
+/**
+ * Answer a question about a video. The conversation is grounded in the
+ * written summary by default; when `file` is provided the video itself is
+ * attached so Gemini can search moments the summary may not capture.
+ */
+export async function generateChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  summary: string,
+  videoName: string,
+  file: GeminiFile | null,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const ai = client(apiKey);
+
+  const contextParts: object[] = [];
+  if (file) {
+    const fileData = file.mimeType
+      ? { fileUri: file.uri, mimeType: file.mimeType }
+      : { fileUri: file.uri };
+    contextParts.push({ fileData });
+  }
+  contextParts.push({
+    text:
+      `Video: ${videoName}\n\n` +
+      (summary
+        ? `Written summary of the video:\n\n${summary}`
+        : "No summary is available; rely on the attached video."),
+  });
+
+  const contents = [
+    { role: "user", parts: contextParts },
+    { role: "model", parts: [{ text: "Understood. Ask me anything about this video." }] },
+    ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
+    { role: "user", parts: [{ text: question }] },
+  ];
+
+  const response = await ai.models.generateContent({
+    model,
+    config: { systemInstruction: CHAT_SYSTEM_PROMPT },
+    contents,
+  });
+
+  const text = response.text;
+  if (!text) throw new Error("No answer returned from Gemini.");
+
+  const meta = response.usageMetadata;
+  const inputTokens = meta?.promptTokenCount ?? 0;
+  const outputTokens = meta?.candidatesTokenCount ?? 0;
+  return {
+    text,
+    usage: {
+      inputTokens,
+      outputTokens,
+      costUsd: estimateCost(model, inputTokens, outputTokens),
+    },
+  };
+}
+
+const LIBRARY_CHAT_SYSTEM_PROMPT =
+  "You are a helpful assistant answering questions across a user's library of " +
+  "video summaries. Ground answers in the provided summaries whenever " +
+  "possible.\n\n" +
+  "CITATIONS: every video in the context has an ID. When your answer draws on " +
+  "a video, cite it with a marker in the exact form [VIDEO:<id>] — or " +
+  "[VIDEO:<id> @ mm:ss] when the summary gives you a specific moment — so the " +
+  "app can render a link to that video. Cite every video you draw from.\n\n" +
+  "You MAY draw on general knowledge for questions beyond the library, but " +
+  "clearly mark that shift (e.g. 'Beyond the library: …'). Keep answers " +
+  "concise and use Markdown.";
+
+/** Minimal video info the library chat needs for context + citations. */
+export interface LibraryChatVideo {
+  id: string;
+  name: string;
+  tags: string[];
+  summary: string;
+}
+
+/**
+ * Answer a question across the whole library. Context is the concatenated
+ * summaries (text-only — cheap). Answers cite videos via [VIDEO:id] markers.
+ */
+export async function generateLibraryChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  videos: LibraryChatVideo[],
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const ai = client(apiKey);
+
+  const context = videos
+    .map(
+      (v) =>
+        `=== VIDEO ID: ${v.id}\nTitle: ${v.name}\n` +
+        (v.tags.length ? `Tags: ${v.tags.join(", ")}\n` : "") +
+        `Summary:\n${v.summary}`
+    )
+    .join("\n\n");
+
+  const contents = [
+    { role: "user", parts: [{ text: `Video library summaries:\n\n${context}` }] },
+    { role: "model", parts: [{ text: "Understood. Ask me anything about the library." }] },
+    ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
+    { role: "user", parts: [{ text: question }] },
+  ];
+
+  const response = await ai.models.generateContent({
+    model,
+    config: { systemInstruction: LIBRARY_CHAT_SYSTEM_PROMPT },
+    contents,
+  });
+
+  const text = response.text;
+  if (!text) throw new Error("No answer returned from Gemini.");
+
+  const meta = response.usageMetadata;
+  const inputTokens = meta?.promptTokenCount ?? 0;
+  const outputTokens = meta?.candidatesTokenCount ?? 0;
+  return {
+    text,
+    usage: {
+      inputTokens,
+      outputTokens,
+      costUsd: estimateCost(model, inputTokens, outputTokens),
+    },
+  };
+}
+
 /** Delete a file from the Gemini File API. */
 export async function deleteFile(apiKey: string, name: string): Promise<void> {
   const ai = client(apiKey);

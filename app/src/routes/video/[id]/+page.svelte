@@ -16,14 +16,15 @@
   import { loadApiKey, loadPrompt, loadDiagramPrompt } from "$lib/settings";
   import {
     DEFAULT_MODEL, type Status, generateSummary, generateDiagram,
-    composePrompt,
+    generateChatReply, composePrompt, type ChatMessage, type GeminiFile,
   } from "$lib/gemini";
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
-    isYouTube, isLoom, parseYouTubeId,
+    saveChat, isYouTube, isLoom, parseYouTubeId,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
+  import ChatPanel from "$lib/ChatPanel.svelte";
   import { captureFrame, sampleFrames } from "$lib/frames";
 
   import { mediaSrc, mediaAbsPath } from "$lib/media";
@@ -52,6 +53,7 @@
   let renderingIds = $state<Set<string>>(new Set());
 
   let playerEl = $state<HTMLVideoElement | null>(null);
+  let chatMessages = $state<ChatMessage[]>([]);
 
   // Resolved asset-protocol URLs for disk-backed media (paths are async).
   let diagramUrl = $state("");
@@ -100,6 +102,7 @@
     record = await getVideo(id);
     customInstructions = record?.customInstructions ?? "";
     customDiagramInstructions = record?.customDiagramInstructions ?? "";
+    chatMessages = record?.chat ?? [];
     loaded = true;
     gemStatus =
       record && apiKey && !isYouTube(record)
@@ -342,6 +345,44 @@
     if (!record) return;
     await removeTag(record, tag);
     record = await getVideo(id);
+  }
+
+  /**
+   * Answer a chat question, grounded in the summary. YouTube records attach
+   * their URL so Gemini can consult the video; local files only attach when
+   * already ACTIVE on Gemini (avoids surprise re-uploads mid-chat).
+   */
+  async function handleAsk(question: string) {
+    if (!record) return;
+    const userMsg: ChatMessage = { role: "user", text: question, at: new Date().toISOString() };
+    chatMessages = [...chatMessages, userMsg];
+    try {
+      let file: GeminiFile | null = null;
+      if (isYt || gemStatus === "active") {
+        file = await ensureActiveFile(apiKey, record, () => {});
+      }
+      const reply = await generateChatReply(
+        apiKey, question, chatMessages.slice(0, -1),
+        record.summary ?? "", record.videoName, file
+      );
+      const modelMsg: ChatMessage = {
+        role: "model",
+        text: reply.text,
+        at: new Date().toISOString(),
+        costUsd: reply.usage.costUsd,
+      };
+      chatMessages = [...chatMessages, modelMsg];
+      await saveChat(record, chatMessages);
+    } catch (err) {
+      chatMessages = chatMessages.slice(0, -1);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleClearChat() {
+    if (!record) return;
+    chatMessages = [];
+    await saveChat(record, []);
   }
 
   function fmtSize(bytes: number): string {
@@ -616,6 +657,18 @@
       </div>
     </section>
   {/if}
+
+  <ChatPanel
+    title={record.videoName}
+    messages={chatMessages}
+    onAsk={handleAsk}
+    onClear={handleClearChat}
+    onSeek={(sec) => seekPlayer(sec)}
+    disabled={!apiKey}
+    emptyHint={record.summary
+      ? "Ask anything about this video — answers include clickable timestamps."
+      : "Summarize the video first for the best answers, or ask away."}
+  />
 
   {#if lightbox}
     <div

@@ -19,11 +19,13 @@ import {
   type Status,
   type TokenUsage,
   type HighlightSpec,
+  type ChatMessage,
 } from "./gemini";
 import { saveMedia, removeMediaDir, isDataUrl } from "./media";
 
 const STORE_FILE = "library.json";
 const KEY_VIDEOS = "videos";
+const KEY_LIBRARY_CHAT = "libraryChat";
 const VIDEO_DIR = "videos";
 
 /** A highlight moment, with its locally-rendered screenshot once generated. */
@@ -84,6 +86,9 @@ export interface VideoRecord {
 
 
   highlights: Highlight[];
+
+  /** Persistent Q&A thread about this video (one thread per video). */
+  chat?: ChatMessage[];
 }
 
 
@@ -114,6 +119,7 @@ export async function listVideos(): Promise<VideoRecord[]> {
     if (r.customDiagramInstructions === undefined) r.customDiagramInstructions = null;
     if (r.sourceType === undefined) r.sourceType = "local";
     if (r.sourceUrl === undefined) r.sourceUrl = null;
+    if (!Array.isArray(r.chat)) r.chat = [];
     if (await migrateRecordMedia(r)) dirty = true;
   }
   if (dirty) await writeAll(records);
@@ -597,6 +603,25 @@ function specToHighlight(spec: HighlightSpec): Highlight {
   };
 }
 
+
+/** Load the global ask-your-library chat thread. */
+export async function loadLibraryChat(): Promise<ChatMessage[]> {
+  const store = await getStore();
+  return (await store.get<ChatMessage[]>(KEY_LIBRARY_CHAT)) ?? [];
+}
+
+/** Replace the global ask-your-library chat thread. */
+export async function saveLibraryChat(chat: ChatMessage[]): Promise<void> {
+  const store = await getStore();
+  await store.set(KEY_LIBRARY_CHAT, chat);
+  await store.save();
+}
+
+/** Replace the record's stored chat thread. */
+export async function saveChat(record: VideoRecord, chat: ChatMessage[]): Promise<void> {
+  record.chat = chat;
+  await upsert(record);
+}
 
 /** Persist a generated diagram image (PNG data URL) onto a record, on disk. */
 export async function saveDiagram(

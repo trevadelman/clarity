@@ -3,7 +3,12 @@
   import { fly, fade } from "svelte/transition";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X } from "lucide-svelte";
-  import { listVideos, listAllTags, clearAll, isYouTube, isLoom, type VideoRecord } from "$lib/videoLibrary";
+  import {
+    listVideos, listAllTags, clearAll, isYouTube, isLoom,
+    loadLibraryChat, saveLibraryChat, type VideoRecord,
+  } from "$lib/videoLibrary";
+  import { generateLibraryChatReply, type ChatMessage } from "$lib/gemini";
+  import ChatPanel from "$lib/ChatPanel.svelte";
   import { formatDuration } from "$lib/thumbnail";
   import { mediaSrc } from "$lib/media";
   import { loadApiKey } from "$lib/settings";
@@ -14,6 +19,8 @@
   let thumbUrls = $state<Record<string, string>>({});
   let loaded = $state(false);
   let clearing = $state(false);
+  let apiKey = $state("");
+  let libraryChat = $state<ChatMessage[]>([]);
 
 
   let query = $state("");
@@ -22,12 +29,36 @@
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
     return videos.filter((v) => {
-      const matchesQuery = q === "" || v.videoName.toLowerCase().includes(q);
+      const matchesQuery =
+        q === "" ||
+        v.videoName.toLowerCase().includes(q) ||
+        (v.tags ?? []).some((t) => t.includes(q)) ||
+        (v.summary ?? "").toLowerCase().includes(q);
       const matchesTags =
         activeTags.length === 0 || activeTags.every((t) => v.tags?.includes(t));
       return matchesQuery && matchesTags;
     });
   });
+
+  /**
+   * When a video matches only via its summary text, show a short snippet
+   * around the first occurrence so the user sees why it matched.
+   */
+  function summarySnippet(v: VideoRecord): { before: string; hit: string; after: string } | null {
+    const q = query.trim().toLowerCase();
+    if (!q || !v.summary) return null;
+    if (v.videoName.toLowerCase().includes(q)) return null;
+    const text = v.summary;
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx < 0) return null;
+    const start = Math.max(0, idx - 40);
+    const end = Math.min(text.length, idx + q.length + 60);
+    return {
+      before: (start > 0 ? "…" : "") + text.slice(start, idx),
+      hit: text.slice(idx, idx + q.length),
+      after: text.slice(idx + q.length, end) + (end < text.length ? "…" : ""),
+    };
+  }
 
   function toggleTag(tag: string) {
     activeTags = activeTags.includes(tag)
@@ -53,8 +84,44 @@
 
   onMount(async () => {
     await refresh();
+    apiKey = await loadApiKey();
+    libraryChat = await loadLibraryChat();
     loaded = true;
   });
+
+  const summarized = $derived(videos.filter((v) => v.summary));
+  const chatVideoNames = $derived(
+    Object.fromEntries(videos.map((v) => [v.id, v.videoName]))
+  );
+
+  async function handleLibraryAsk(question: string) {
+    const userMsg: ChatMessage = { role: "user", text: question, at: new Date().toISOString() };
+    libraryChat = [...libraryChat, userMsg];
+    try {
+      const reply = await generateLibraryChatReply(
+        apiKey, question, libraryChat.slice(0, -1),
+        summarized.map((v) => ({
+          id: v.id,
+          name: v.videoName,
+          tags: v.tags ?? [],
+          summary: v.summary ?? "",
+        }))
+      );
+      libraryChat = [
+        ...libraryChat,
+        { role: "model", text: reply.text, at: new Date().toISOString(), costUsd: reply.usage.costUsd },
+      ];
+      await saveLibraryChat(libraryChat);
+    } catch (err) {
+      libraryChat = libraryChat.slice(0, -1);
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handleClearLibraryChat() {
+    libraryChat = [];
+    await saveLibraryChat([]);
+  }
 
   async function handleClearAll() {
     const ok = await confirm(
@@ -64,7 +131,6 @@
     if (!ok) return;
     clearing = true;
     try {
-      const apiKey = await loadApiKey();
       await clearAll(apiKey);
       videos = await listVideos();
       toast.success("All app data cleared.");
@@ -124,7 +190,7 @@
   <div class="toolbar">
     <div class="search">
       <Search size={16} />
-      <input type="text" placeholder="Search by name…" bind:value={query} />
+      <input type="text" placeholder="Search names, tags & summaries…" bind:value={query} />
       {#if query}
         <button class="clear-q" onclick={() => (query = "")} aria-label="Clear search">
           <X size={14} />
@@ -171,6 +237,10 @@
             <div class="meta">
               {isYouTube(v) ? "YouTube" : fmtSize(v.sizeBytes)} · {relTime(v.addedAt)}
             </div>
+            {#if summarySnippet(v)}
+              {@const s = summarySnippet(v)!}
+              <div class="snippet">{s.before}<mark>{s.hit}</mark>{s.after}</div>
+            {/if}
             {#if v.tags && v.tags.length > 0}
               <div class="card-tags">
                 {#each v.tags as t (t)}
@@ -200,6 +270,18 @@
     {/each}
   </ul>
   {/if}
+
+  <ChatPanel
+    title="Ask your library"
+    messages={libraryChat}
+    onAsk={handleLibraryAsk}
+    onClear={handleClearLibraryChat}
+    disabled={!apiKey || summarized.length === 0}
+    emptyHint={summarized.length === 0
+      ? "Summarize at least one video to ask questions across your library."
+      : `Ask across all ${summarized.length} summarized video${summarized.length === 1 ? "" : "s"} — answers cite their sources.`}
+    videoNames={chatVideoNames}
+  />
 
   <div class="danger-zone">
     <button class="btn danger" onclick={handleClearAll} disabled={clearing}>
@@ -350,6 +432,22 @@
     white-space: nowrap;
   }
   .meta { font-size: 0.8rem; color: var(--text-dim); }
+  .snippet {
+    margin-top: 0.4rem;
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    line-height: 1.45;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .snippet mark {
+    background: color-mix(in srgb, var(--accent) 25%, transparent);
+    color: var(--accent);
+    border-radius: 3px;
+    padding: 0 2px;
+  }
   .card-tags { margin-top: 0.5rem; display: flex; gap: 0.3rem; flex-wrap: wrap; }
   .tag-pill {
     display: inline-flex;

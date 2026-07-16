@@ -1,4 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { fetch as httpFetch } from "@tauri-apps/plugin-http";
 import {
   appDataDir,
   join,
@@ -40,7 +41,7 @@ export interface Highlight {
 
 
 
-export type SourceType = "local" | "youtube";
+export type SourceType = "local" | "youtube" | "loom";
 
 export interface VideoRecord {
   id: string;
@@ -238,6 +239,11 @@ export function isYouTube(record: VideoRecord): boolean {
   return record.sourceType === "youtube";
 }
 
+/** True if the record's video was downloaded from a Loom share link. */
+export function isLoom(record: VideoRecord): boolean {
+  return record.sourceType === "loom";
+}
+
 /**
  * Extract the 11-character YouTube video ID from a URL, or null if the URL
  * isn't a recognizable YouTube video link. Accepts watch, youtu.be, shorts,
@@ -260,6 +266,121 @@ export function parseYouTubeId(url: string): string | null {
     if (m) return idOk(m[2]);
   }
   return null;
+}
+
+/**
+ * Extract the 32-hex-character Loom video ID from a share/embed URL, or null
+ * if the URL isn't a recognizable Loom video link.
+ */
+export function parseLoomId(url: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return null;
+  }
+  const host = u.hostname.replace(/^www\./, "");
+  if (host !== "loom.com") return null;
+  const m = u.pathname.match(/^\/(share|embed)\/([0-9a-f]{32})/);
+  return m ? m[2] : null;
+}
+
+/**
+ * Add a Loom video by share URL: fetch its metadata via oEmbed, download the
+ * transcoded MP4 into the local library, and create a normal local-file
+ * record (so Gemini upload, screenshots, and the native player all work).
+ */
+export async function addLoomVideo(
+  url: string,
+  onProgress?: (downloaded: number, total: number | null) => void
+): Promise<VideoRecord> {
+  const loomId = parseLoomId(url);
+  if (!loomId) throw new Error("That doesn't look like a valid Loom share link.");
+
+  const shareUrl = `https://www.loom.com/share/${loomId}`;
+
+  // Metadata first — this also confirms the video is publicly accessible.
+  const oembedRes = await httpFetch(
+    `https://www.loom.com/v1/oembed?url=${encodeURIComponent(shareUrl)}&format=json`
+  );
+  if (!oembedRes.ok) {
+    throw new Error(
+      "Couldn't read that Loom video. Make sure its link access is set to public."
+    );
+  }
+  const meta = (await oembedRes.json()) as {
+    title?: string;
+    duration?: number;
+    thumbnail_url?: string;
+  };
+
+  // Loom serves a time-limited signed CDN URL for the transcoded MP4.
+  const urlRes = await httpFetch(
+    `https://www.loom.com/api/campaigns/sessions/${loomId}/transcoded-url`,
+    { method: "POST", headers: { "Content-Type": "application/json" } }
+  );
+  if (!urlRes.ok) {
+    throw new Error("Loom didn't provide a download for this video. Is it public?");
+  }
+  const { url: mp4Url } = (await urlRes.json()) as { url?: string };
+  if (!mp4Url) throw new Error("Loom didn't provide a download for this video.");
+
+  const dlRes = await httpFetch(mp4Url);
+  if (!dlRes.ok || !dlRes.body) throw new Error("Downloading the Loom video failed.");
+  const total = Number(dlRes.headers.get("content-length")) || null;
+  const reader = dlRes.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let downloaded = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    downloaded += value.length;
+    onProgress?.(downloaded, total);
+  }
+  const bytes = new Uint8Array(downloaded);
+  let offset = 0;
+  for (const c of chunks) {
+    bytes.set(c, offset);
+    offset += c.length;
+  }
+
+  const dir = await join(await appDataDir(), VIDEO_DIR);
+  if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+  const id = crypto.randomUUID();
+  const localPath = await join(dir, `${id}.mp4`);
+  await writeFile(localPath, bytes);
+
+  const record: VideoRecord = {
+    id,
+    videoName: meta.title?.trim() || shareUrl,
+    sourceType: "loom",
+    sourceUrl: shareUrl,
+    localPath,
+    mimeType: "video/mp4",
+    sizeBytes: bytes.length,
+    addedAt: new Date().toISOString(),
+    thumbnailPath: null,
+    durationSec: meta.duration ?? null,
+    tags: [],
+    customInstructions: null,
+    customDiagramInstructions: null,
+    geminiName: null,
+    geminiUri: null,
+    summary: null,
+    summaryPrompt: null,
+    summaryModel: null,
+    summarizedAt: null,
+    summaryInputTokens: null,
+    summaryOutputTokens: null,
+    summaryCostUsd: null,
+    diagramPath: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
+  };
+  await upsert(record);
+  return record;
 }
 
 /** Add a YouTube video by URL: fetch its thumbnail and create a record. */

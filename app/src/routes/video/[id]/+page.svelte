@@ -21,7 +21,7 @@
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
-    isYouTube, parseYouTubeId,
+    isYouTube, isLoom, parseYouTubeId,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import { captureFrame, sampleFrames } from "$lib/frames";
@@ -394,6 +394,10 @@
           <span>{fmtSize(record.sizeBytes)}</span>
           {#if formatDuration(record.durationSec)}<span>· {formatDuration(record.durationSec)}</span>{/if}
           <span>· {record.mimeType}</span>
+          {#if isLoom(record) && record.sourceUrl}
+            <span>·</span>
+            <a class="yt-link" href={record.sourceUrl} target="_blank" rel="noreferrer">Loom source</a>
+          {/if}
         {/if}
       </div>
       {#if isYt}

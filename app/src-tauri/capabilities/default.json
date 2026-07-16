@@ -15,6 +15,14 @@
     "dialog:allow-save",
     "dialog:allow-confirm",
     "store:default",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://*.loom.com/*" },
+        { "url": "https://loom.com/*" },
+        { "url": "https://cdn.loom.com/*" }
+      ]
+    },
     "fs:default",
     {
       "identifier": "fs:allow-mkdir",

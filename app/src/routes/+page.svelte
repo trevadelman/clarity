@@ -3,7 +3,7 @@
   import { fly, fade } from "svelte/transition";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X } from "lucide-svelte";
-  import { listVideos, listAllTags, clearAll, isYouTube, type VideoRecord } from "$lib/videoLibrary";
+  import { listVideos, listAllTags, clearAll, isYouTube, isLoom, type VideoRecord } from "$lib/videoLibrary";
   import { formatDuration } from "$lib/thumbnail";
   import { mediaSrc } from "$lib/media";
   import { loadApiKey } from "$lib/settings";
@@ -186,6 +186,8 @@
               {/if}
               {#if isYouTube(v)}
                 <span class="badge yt">YouTube</span>
+              {:else if isLoom(v)}
+                <span class="badge loom">Loom</span>
               {:else if v.geminiName}
                 <span class="badge gem"><Cloud size={12} /> On Gemini</span>
               {:else}
@@ -373,6 +375,7 @@
   .badge.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .badge.gem { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
   .badge.yt { background: color-mix(in srgb, #ff0033 14%, transparent); color: #e5254c; }
+  .badge.loom { background: color-mix(in srgb, #625df5 16%, transparent); color: #7a76ff; }
 
   .skeleton {
     aspect-ratio: 16 / 9;

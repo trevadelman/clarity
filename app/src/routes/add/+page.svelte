@@ -5,7 +5,10 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { UploadCloud, Film, Link } from "lucide-svelte";
-  import { addVideo, addYouTubeVideo, parseYouTubeId, setThumbnail } from "$lib/videoLibrary";
+  import {
+    addVideo, addYouTubeVideo, addLoomVideo, parseYouTubeId, parseLoomId,
+    setThumbnail,
+  } from "$lib/videoLibrary";
   import { probeVideo } from "$lib/thumbnail";
   import { toast } from "$lib/toast";
 
@@ -16,8 +19,12 @@
   let stage = $state("");
   let ytUrl = $state("");
   let ytBusy = $state(false);
+  let ytStage = $state("");
 
-  const ytValid = $derived(parseYouTubeId(ytUrl) !== null);
+  const linkKind = $derived(
+    parseYouTubeId(ytUrl) ? "youtube" : parseLoomId(ytUrl) ? "loom" : null
+  );
+  const ytValid = $derived(linkKind !== null);
 
   let unlistenDrop: (() => void) | null = null;
 
@@ -60,16 +67,30 @@
     }
   }
 
-  async function handleAddYouTube() {
+  async function handleAddLink() {
     if (!ytValid || ytBusy) return;
     ytBusy = true;
     try {
-      const record = await addYouTubeVideo(ytUrl);
-      toast.success("YouTube video added to your library.");
-      await goto(`/video/${record.id}`);
+      if (linkKind === "loom") {
+        ytStage = "Fetching from Loom…";
+        const record = await addLoomVideo(ytUrl, (downloaded, total) => {
+          const pct = total ? ` ${Math.round((downloaded / total) * 100)}%` : "";
+          ytStage = `Downloading from Loom…${pct}`;
+        });
+        ytStage = "Generating thumbnail…";
+        const probe = await probeVideo(record.localPath);
+        await setThumbnail(record, probe.thumbnail, probe.durationSec ?? record.durationSec);
+        toast.success("Loom video added to your library.");
+        await goto(`/video/${record.id}`);
+      } else {
+        const record = await addYouTubeVideo(ytUrl);
+        toast.success("YouTube video added to your library.");
+        await goto(`/video/${record.id}`);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
       ytBusy = false;
+      ytStage = "";
     }
   }
 
@@ -109,20 +130,20 @@
 
 <div class="or-divider"><span>or</span></div>
 
-<form class="yt-row" onsubmit={(e) => { e.preventDefault(); handleAddYouTube(); }}>
+<form class="yt-row" onsubmit={(e) => { e.preventDefault(); handleAddLink(); }}>
   <span class="yt-icon"><Link size={18} /></span>
   <input
     type="url"
-    placeholder="Paste a YouTube link… (public videos only)"
+    placeholder="Paste a YouTube or Loom link… (public videos only)"
     bind:value={ytUrl}
     disabled={ytBusy}
   />
   <button type="submit" class="yt-btn" disabled={!ytValid || ytBusy}>
-    {#if ytBusy}<span class="mini-spin"></span> Adding…{:else}Add{/if}
+    {#if ytBusy}<span class="mini-spin"></span> {ytStage || "Adding…"}{:else}Add{/if}
   </button>
 </form>
 {#if ytUrl.trim() && !ytValid}
-  <p class="yt-hint">Enter a full YouTube video URL, e.g. https://www.youtube.com/watch?v=…</p>
+  <p class="yt-hint">Enter a full YouTube or Loom video URL, e.g. https://www.youtube.com/watch?v=… or https://www.loom.com/share/…</p>
 {/if}
 
 <div class="info" in:fade>
@@ -130,7 +151,8 @@
   <p>
     Local files are copied into the app's library and uploaded to Gemini only
     when you summarize them. YouTube videos are analyzed straight from their
-    URL — nothing is downloaded or uploaded.
+    URL — nothing is downloaded. Loom videos are downloaded into your library
+    and behave like local files.
   </p>
 </div>
 

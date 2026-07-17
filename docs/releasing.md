@@ -18,8 +18,8 @@ the signed manifest (`latest.json`) — or auto-update will break.
   signature against the **public key baked into the app**, installs it, and
   relaunches.
 - Because the new files are written by the already-running, already-trusted app
-  process, macOS does **not** quarantine them — so auto-updates need no `xattr`
-  step. Only the very first manual DMG install does.
+  process, macOS does **not** quarantine them. And since v0.8.0 builds are
+  notarized, first-time DMG installs are clean too — no `xattr` anywhere.
 
 ---
 
@@ -40,6 +40,23 @@ These steps were done once and do **not** need to be repeated:
    permissions in `app/src-tauri/capabilities/default.json`.
 3. **`createUpdaterArtifacts: true`** set under `bundle` in `tauri.conf.json` so
    builds emit the `.app.tar.gz` updater artifact and its `.sig`.
+4. **Apple Developer ID signing + notarization** (added in v0.8.0):
+   - A "Developer ID Application" certificate for **Xetobase Inc (S3DGFW67TL)**
+     lives in the maintainer's login keychain (created via CSR from Keychain
+     Access, downloaded from the developer portal).
+   - Notarization credentials are stored in the keychain under the profile
+     **`clarity-notary`**:
+     ```bash
+     xcrun notarytool store-credentials clarity-notary \
+       --apple-id <apple-id email> --team-id S3DGFW67TL \
+       --password <app-specific-password>
+     ```
+     (App-specific passwords are generated at account.apple.com → Sign-In and
+     Security → App-Specific Passwords.)
+   - With the `APPLE_*` env vars set (step 3 below), `tauri build` signs with
+     hardened runtime, submits to Apple's notary service, waits for
+     acceptance, and staples the ticket automatically. First-ever submission
+     took ~45 min; subsequent ones are typically 1–10 min.
 
 > ⚠️ **If the private key or its password is lost, auto-update breaks permanently** —
 > you'd have to ship a new public key in a new manual build, and existing installs
@@ -100,7 +117,23 @@ lsof -ti:1420 | xargs kill -9 2>/dev/null; pkill -f "target/debug/app" 2>/dev/nu
 
 export TAURI_SIGNING_PRIVATE_KEY="$(cat .tauri-keys/clarity.key)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+
+# Apple code signing + notarization (Developer ID)
+export APPLE_SIGNING_IDENTITY="Developer ID Application: Xetobase Inc (S3DGFW67TL)"
+export APPLE_ID="<apple-id email>"
+export APPLE_PASSWORD="<app-specific password>"   # same one stored in clarity-notary
+export APPLE_TEAM_ID="S3DGFW67TL"
+
 npm run tauri build
+```
+The build now includes a "Notarizing" phase (Apple's queue; minutes, not
+seconds — don't kill it). Check progress from another terminal with
+`xcrun notarytool history --keychain-profile clarity-notary`.
+
+Verify the result:
+```bash
+spctl -a -vv src-tauri/target/release/bundle/macos/Clarity.app
+# expect: accepted · source=Notarized Developer ID
 ```
 On success you'll see, in `app/src-tauri/target/release/bundle/`:
 - `dmg/Clarity_X.Y.Z_aarch64.dmg`
@@ -160,13 +193,10 @@ That's it — installs on the previous auto-update build will pick up `vX.Y.Z`.
   attach all three assets to every release.
 - **The tarball name is unversioned** (`Clarity.app.tar.gz`) — that's expected;
   the version lives in the release tag and the manifest URL.
-- **Apple notarization** is intentionally *not* configured. The updater signature
-  guarantees integrity, but the app isn't notarized, so the **first** manual DMG
-  install still needs:
-  ```bash
-  xattr -dr com.apple.quarantine /Applications/Clarity.app
-  ```
-  Every subsequent auto-update is seamless. If Clarity is ever distributed widely,
-  add an Apple Developer cert + notarization to remove `xattr` even on first install.
+- **Apple notarization is configured** (since v0.8.0). Builds are signed with
+  a Developer ID certificate and notarized, so first-time DMG installs open
+  cleanly — **no `xattr` step needed**. If the `APPLE_*` env vars are omitted,
+  the build still succeeds but ships un-notarized and Gatekeeper will block
+  first installs; always set them for releases.
 - **Apple Silicon only.** Builds target `darwin-aarch64`. To support Intel, build
   on/for `x86_64` and add a `darwin-x86_64` entry to the manifest.

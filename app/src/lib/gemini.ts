@@ -1,4 +1,8 @@
-import { GoogleGenAI } from "@google/genai";
+import {
+  GoogleGenAI, Type,
+  type FunctionDeclaration, type GenerateContentResponse,
+} from "@google/genai";
+import { trackSpend } from "./spend";
 
 export const DEFAULT_PROMPT =
   "You are creating a COMPREHENSIVE written overview of this video — not a " +
@@ -35,8 +39,10 @@ export interface ModelInfo {
   label: string;
   /** USD per 1M input tokens. */
   inputPerM: number;
-  /** USD per 1M output tokens. */
+  /** USD per 1M output tokens (thinking tokens bill at this rate too). */
   outputPerM: number;
+  /** USD per 1M cached input tokens (implicit context caching). */
+  cachedPerM: number;
 }
 
 
@@ -48,8 +54,9 @@ export const MODELS: Record<ModelId, ModelInfo> = {
   "gemini-3.5-flash": {
     id: "gemini-3.5-flash",
     label: "Gemini 3.5 Flash",
-    inputPerM: 0.3,
-    outputPerM: 2.5,
+    inputPerM: 1.5,
+    outputPerM: 9.0,
+    cachedPerM: 0.15,
   },
 };
 
@@ -65,13 +72,30 @@ export interface TokenUsage {
 export function estimateCost(
   model: ModelId,
   inputTokens: number,
-  outputTokens: number
+  outputTokens: number,
+  cachedTokens = 0
 ): number {
   const info = MODELS[model] ?? MODELS[DEFAULT_MODEL];
   return (
-    (inputTokens / 1_000_000) * info.inputPerM +
+    ((inputTokens - cachedTokens) / 1_000_000) * info.inputPerM +
+    (cachedTokens / 1_000_000) * info.cachedPerM +
     (outputTokens / 1_000_000) * info.outputPerM
   );
+}
+
+/**
+ * Extract billed token usage from a response. Input tokens that hit the
+ * implicit context cache bill at the cheaper cached rate; thinking tokens
+ * bill as output.
+ */
+function usageFromResponse(model: ModelId, response: GenerateContentResponse): TokenUsage {
+  const meta = response.usageMetadata;
+  const inputTokens = meta?.promptTokenCount ?? 0;
+  const cachedTokens = meta?.cachedContentTokenCount ?? 0;
+  const outputTokens = (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+  const costUsd = estimateCost(model, inputTokens, outputTokens, cachedTokens);
+  void trackSpend(costUsd);
+  return { inputTokens, outputTokens, costUsd };
 }
 
 export type Status = "idle" | "uploading" | "processing" | "generating" | "done" | "error";
@@ -275,17 +299,8 @@ export async function generateSummary(
     if (!text) throw new Error("No summary text returned from Gemini.");
   }
 
-  const meta = response.usageMetadata;
-  const inputTokens = meta?.promptTokenCount ?? 0;
-  const outputTokens = meta?.candidatesTokenCount ?? 0;
-  const usage: TokenUsage = {
-    inputTokens,
-    outputTokens,
-    costUsd: estimateCost(model, inputTokens, outputTokens),
-  };
-
   onStatus("done");
-  return { text, highlights, usage };
+  return { text, highlights, usage: usageFromResponse(model, response) };
 }
 
 export interface DiagramResult {
@@ -351,6 +366,7 @@ export async function generateDiagram(
     const data = part.inlineData?.data;
     if (data) {
       const mime = part.inlineData?.mimeType ?? "image/png";
+      void trackSpend(IMAGE_COST_PER_IMAGE);
       return { image: `data:${mime};base64,${data}`, costUsd: IMAGE_COST_PER_IMAGE };
     }
   }
@@ -365,6 +381,8 @@ export interface ChatMessage {
   at: string;
   /** Cost of producing this model message (user messages: undefined). */
   costUsd?: number;
+  /** Research steps taken to produce this message (repo chats only). */
+  toolCalls?: string[];
 }
 
 const CHAT_SYSTEM_PROMPT =
@@ -382,6 +400,8 @@ const CHAT_SYSTEM_PROMPT =
 export interface ChatReply {
   text: string;
   usage: TokenUsage;
+  /** Research steps taken (repo chats only). */
+  toolCalls?: string[];
 }
 
 /**
@@ -430,18 +450,52 @@ export async function generateChatReply(
 
   const text = response.text;
   if (!text) throw new Error("No answer returned from Gemini.");
+  return { text, usage: usageFromResponse(model, response) };
+}
 
-  const meta = response.usageMetadata;
-  const inputTokens = meta?.promptTokenCount ?? 0;
-  const outputTokens = meta?.candidatesTokenCount ?? 0;
-  return {
-    text,
-    usage: {
-      inputTokens,
-      outputTokens,
-      costUsd: estimateCost(model, inputTokens, outputTokens),
-    },
-  };
+const DIGEST_SYSTEM_PROMPT =
+  "You are a senior engineer explaining recent changes in a codebase to a " +
+  "teammate. You are given commit messages and their diffs. Produce a clear " +
+  "Markdown digest of WHAT CHANGED, grouped by theme (features, refactors, " +
+  "fixes, docs, chores) rather than commit-by-commit. Call out anything " +
+  "risky, breaking, or worth reviewing. Reference files by path in backticks " +
+  "and commits by their short sha in backticks where helpful. Be concrete " +
+  "and concise — a teammate should read this in two minutes.";
+
+/**
+ * Summarize a set of commit diffs into a change digest. Pure text call —
+ * cheap. Diffs should already be truncated to sane sizes by the caller.
+ */
+export async function generateChangeDigest(
+  apiKey: string,
+  repoLabel: string,
+  commits: { sha: string; message: string; author: string; date: string; patches: string[] }[],
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const ai = client(apiKey);
+
+  const body = commits
+    .map(
+      (c) =>
+        `=== COMMIT ${c.sha.slice(0, 7)} · ${c.author} · ${c.date}\n` +
+        `${c.message}\n\nDIFF:\n${c.patches.join("\n\n")}`
+    )
+    .join("\n\n\n");
+
+  const response = await ai.models.generateContent({
+    model,
+    config: { systemInstruction: DIGEST_SYSTEM_PROMPT },
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: `Repository: ${repoLabel}\n\n${body}` }],
+      },
+    ],
+  });
+
+  const text = response.text;
+  if (!text) throw new Error("No digest returned from Gemini.");
+  return { text, usage: usageFromResponse(model, response) };
 }
 
 const LIBRARY_CHAT_SYSTEM_PROMPT =
@@ -501,18 +555,199 @@ export async function generateLibraryChatReply(
 
   const text = response.text;
   if (!text) throw new Error("No answer returned from Gemini.");
+  return { text, usage: usageFromResponse(model, response) };
+}
 
-  const meta = response.usageMetadata;
-  const inputTokens = meta?.promptTokenCount ?? 0;
-  const outputTokens = meta?.candidatesTokenCount ?? 0;
-  return {
-    text,
-    usage: {
-      inputTokens,
-      outputTokens,
-      costUsd: estimateCost(model, inputTokens, outputTokens),
+const REPO_CHAT_SYSTEM_PROMPT =
+  "You are a senior engineer answering questions about a GitHub repository. " +
+  "You have LIVE read access to the repo through the provided tools: listing " +
+  "commits, reading commit diffs, reading files, listing directories, and " +
+  "searching code. Use them whenever the provided context does not fully " +
+  "answer the question — do not guess about code you can read.\n\n" +
+  "You are also given the repo's metadata and any saved change digests " +
+  "(pre-computed AI summaries of selected commit ranges). Treat digests as " +
+  "helpful background, not ground truth — verify against the repo when it " +
+  "matters.\n\n" +
+  "Reference files by path and commits by short sha in backticks. Answer in " +
+  "concise Markdown. If something is not covered by the context and cannot be " +
+  "found with the tools, say so plainly.";
+
+const REPO_TOOL_DECLARATIONS: FunctionDeclaration[] = [
+  {
+    name: "list_commits",
+    description:
+      "List commits on the repo's default branch over a recent window (most recent first).",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        since_days: {
+          type: Type.NUMBER,
+          description: "How many days back to look, e.g. 7 or 30.",
+        },
+      },
+      required: ["since_days"],
     },
+  },
+  {
+    name: "get_commit_diff",
+    description: "Get a commit's message, stats, and per-file unified diffs.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        sha: { type: Type.STRING, description: "The commit sha (full or short)." },
+      },
+      required: ["sha"],
+    },
+  },
+  {
+    name: "read_file",
+    description: "Read a file's current content from the default branch.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        path: { type: Type.STRING, description: "File path from repo root, e.g. src/lib/media.ts" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "list_directory",
+    description: "List the entries of a directory. Use an empty string for the repo root.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        path: { type: Type.STRING, description: "Directory path from repo root, or '' for root." },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "search_code",
+    description: "Search the repo's code for a term; returns matching file paths with fragments.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        query: { type: Type.STRING, description: "Search term, e.g. a function or type name." },
+      },
+      required: ["query"],
+    },
+  },
+];
+
+/** Executes one named repo tool call and returns a JSON-serializable result. */
+export type RepoToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/** Minimal digest info the repo chat needs for context. */
+export interface RepoChatDigest {
+  label: string;
+  generatedAt: string;
+  text: string;
+}
+
+/** Fallback research-turn budget when the caller doesn't pass one. */
+const DEFAULT_TOOL_TURNS = 15;
+
+/**
+ * Agentic repo Q&A: Gemini can call GitHub research tools (via `execute`)
+ * in a loop before answering. `onToolCall` reports activity for the UI;
+ * `maxToolTurns` caps how many research rounds are allowed.
+ */
+export async function generateRepoChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  repoContext: string,
+  digests: RepoChatDigest[],
+  execute: RepoToolExecutor,
+  onToolCall: (label: string) => void = () => {},
+  maxToolTurns: number = DEFAULT_TOOL_TURNS,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const ai = client(apiKey);
+
+  const digestText = digests.length
+    ? digests
+        .map((d) => `## Digest (${d.label}, ${d.generatedAt})\n\n${d.text}`)
+        .join("\n\n")
+    : "(no saved change digests yet)";
+
+  const contents: object[] = [
+    {
+      role: "user",
+      parts: [
+        { text: `${repoContext}\n\nSaved change digests:\n\n${digestText}` },
+      ],
+    },
+    { role: "model", parts: [{ text: "Understood. Ask me anything about this repository." }] },
+    ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
+    { role: "user", parts: [{ text: question }] },
+  ];
+
+  const config = {
+    systemInstruction: REPO_CHAT_SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: REPO_TOOL_DECLARATIONS }],
   };
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens = 0;
+  const toolCalls: string[] = [];
+
+  for (let turn = 0; turn <= maxToolTurns; turn++) {
+    const response = await ai.models.generateContent({ model, config, contents });
+
+    const meta = response.usageMetadata;
+    inputTokens += meta?.promptTokenCount ?? 0;
+    outputTokens += (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+    cachedTokens += meta?.cachedContentTokenCount ?? 0;
+
+    const calls = response.functionCalls;
+    if (!calls || calls.length === 0) {
+      const text = response.text;
+      if (!text) throw new Error("No answer returned from Gemini.");
+      const costUsd = estimateCost(model, inputTokens, outputTokens, cachedTokens);
+      void trackSpend(costUsd);
+      return { text, usage: { inputTokens, outputTokens, costUsd }, toolCalls };
+    }
+
+    // Append the model's turn verbatim (preserves thought signatures), then
+    // execute each requested tool and reply with matching-id responses.
+    const modelContent = response.candidates?.[0]?.content;
+    if (modelContent) contents.push(modelContent);
+
+    const responseParts: object[] = [];
+    for (const call of calls) {
+      const name = call.name ?? "";
+      const args = (call.args ?? {}) as Record<string, unknown>;
+      const label = describeToolCall(name, args);
+      toolCalls.push(label);
+      onToolCall(label);
+      let result: unknown;
+      try {
+        result = await execute(name, args);
+      } catch (err) {
+        result = { error: err instanceof Error ? err.message : String(err) };
+      }
+      responseParts.push({
+        functionResponse: { name, id: call.id, response: { result } },
+      });
+    }
+    contents.push({ role: "user", parts: responseParts });
+  }
+
+  throw new Error("Repo research exceeded the tool-call limit without an answer.");
+}
+
+/** Human-readable label for a tool call, shown in the chat UI. */
+function describeToolCall(name: string, args: Record<string, unknown>): string {
+  switch (name) {
+    case "list_commits": return `Listing commits from the last ${args.since_days} days…`;
+    case "get_commit_diff": return `Reading commit ${String(args.sha).slice(0, 7)}…`;
+    case "read_file": return `Reading ${args.path}…`;
+    case "list_directory": return `Browsing ${args.path || "repo root"}…`;
+    case "search_code": return `Searching code for “${args.query}”…`;
+    default: return `Running ${name}…`;
+  }
 }
 
 /** Delete a file from the Gemini File API. */

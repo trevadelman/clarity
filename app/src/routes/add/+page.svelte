@@ -6,10 +6,12 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { UploadCloud, Film, Link } from "lucide-svelte";
   import {
-    addVideo, addYouTubeVideo, addLoomVideo, parseYouTubeId, parseLoomId,
-    setThumbnail,
+    addVideo, addYouTubeVideo, addLoomVideo, addGitHubRepo,
+    parseYouTubeId, parseLoomId, setThumbnail,
   } from "$lib/videoLibrary";
+  import { parseGitHubRepo } from "$lib/github";
   import { probeVideo } from "$lib/thumbnail";
+  import { loadGitHubToken } from "$lib/settings";
   import { toast } from "$lib/toast";
 
   const VIDEO_EXTS = ["mp4", "mov", "webm"];
@@ -22,7 +24,13 @@
   let ytStage = $state("");
 
   const linkKind = $derived(
-    parseYouTubeId(ytUrl) ? "youtube" : parseLoomId(ytUrl) ? "loom" : null
+    parseYouTubeId(ytUrl)
+      ? "youtube"
+      : parseLoomId(ytUrl)
+        ? "loom"
+        : parseGitHubRepo(ytUrl)
+          ? "github"
+          : null
   );
   const ytValid = $derived(linkKind !== null);
 
@@ -71,7 +79,13 @@
     if (!ytValid || ytBusy) return;
     ytBusy = true;
     try {
-      if (linkKind === "loom") {
+      if (linkKind === "github") {
+        ytStage = "Fetching repo info…";
+        const token = await loadGitHubToken();
+        const record = await addGitHubRepo(ytUrl, token);
+        toast.success("GitHub repo added to your library.");
+        await goto(`/video/${record.id}`);
+      } else if (linkKind === "loom") {
         ytStage = "Fetching from Loom…";
         const record = await addLoomVideo(ytUrl, (downloaded, total) => {
           const pct = total ? ` ${Math.round((downloaded / total) * 100)}%` : "";
@@ -134,7 +148,7 @@
   <span class="yt-icon"><Link size={18} /></span>
   <input
     type="url"
-    placeholder="Paste a YouTube or Loom link… (public videos only)"
+    placeholder="Paste a YouTube, Loom, or GitHub repo link…"
     bind:value={ytUrl}
     disabled={ytBusy}
   />
@@ -143,7 +157,7 @@
   </button>
 </form>
 {#if ytUrl.trim() && !ytValid}
-  <p class="yt-hint">Enter a full YouTube or Loom video URL, e.g. https://www.youtube.com/watch?v=… or https://www.loom.com/share/…</p>
+  <p class="yt-hint">Enter a full YouTube, Loom, or GitHub URL, e.g. https://www.youtube.com/watch?v=… or https://github.com/owner/repo</p>
 {/if}
 
 <div class="info" in:fade>
@@ -152,7 +166,9 @@
     Local files are copied into the app's library and uploaded to Gemini only
     when you summarize them. YouTube videos are analyzed straight from their
     URL — nothing is downloaded. Loom videos are downloaded into your library
-    and behave like local files.
+    and behave like local files. GitHub repos become activity trackers: browse
+    recent commits and generate AI digests of what changed (add a token in
+    Settings for private repos).
   </p>
 </div>
 

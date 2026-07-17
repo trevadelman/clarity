@@ -22,6 +22,11 @@ import {
   type ChatMessage,
 } from "./gemini";
 import { saveMedia, removeMediaDir, isDataUrl } from "./media";
+import {
+  parseGitHubRepo,
+  fetchRepoInfo,
+  type RepoInfo,
+} from "./github";
 
 const STORE_FILE = "library.json";
 const KEY_VIDEOS = "videos";
@@ -43,7 +48,20 @@ export interface Highlight {
 
 
 
-export type SourceType = "local" | "youtube" | "loom";
+export type SourceType = "local" | "youtube" | "loom" | "github";
+
+/** A saved AI digest of a set of commits. */
+export interface RepoDigest {
+  id: string;
+  /** Markdown digest text. */
+  text: string;
+  /** Human label for the range, e.g. "Last 7 days · 14 commits". */
+  label: string;
+  /** Short shas covered by this digest. */
+  shas: string[];
+  generatedAt: string;
+  costUsd: number;
+}
 
 export interface VideoRecord {
   id: string;
@@ -89,6 +107,11 @@ export interface VideoRecord {
 
   /** Persistent Q&A thread about this video (one thread per video). */
   chat?: ChatMessage[];
+
+  /** GitHub repo metadata for `sourceType === "github"` records. */
+  repoInfo?: RepoInfo | null;
+  /** Saved commit-change digests (newest first). */
+  repoDigests?: RepoDigest[];
 }
 
 
@@ -120,6 +143,8 @@ export async function listVideos(): Promise<VideoRecord[]> {
     if (r.sourceType === undefined) r.sourceType = "local";
     if (r.sourceUrl === undefined) r.sourceUrl = null;
     if (!Array.isArray(r.chat)) r.chat = [];
+    if (r.repoInfo === undefined) r.repoInfo = null;
+    if (!Array.isArray(r.repoDigests)) r.repoDigests = [];
     if (await migrateRecordMedia(r)) dirty = true;
   }
   if (dirty) await writeAll(records);
@@ -248,6 +273,91 @@ export function isYouTube(record: VideoRecord): boolean {
 /** True if the record's video was downloaded from a Loom share link. */
 export function isLoom(record: VideoRecord): boolean {
   return record.sourceType === "loom";
+}
+
+/** True if the record tracks a GitHub repository. */
+export function isGitHub(record: VideoRecord): boolean {
+  return record.sourceType === "github";
+}
+
+/** Add a GitHub repo by URL: fetch metadata and create an activity record. */
+export async function addGitHubRepo(url: string, token: string): Promise<VideoRecord> {
+  const ref = parseGitHubRepo(url);
+  if (!ref) throw new Error("That doesn't look like a valid GitHub repository link.");
+
+  const info = await fetchRepoInfo(ref, token);
+  const id = crypto.randomUUID();
+
+  // GitHub's OpenGraph card makes a ready-made thumbnail (public repos only).
+  let thumbnailPath: string | null = null;
+  if (!info.isPrivate) {
+    try {
+      const res = await httpFetch(
+        `https://opengraph.githubassets.com/1/${ref.owner}/${ref.repo}`
+      );
+      if (res.ok) {
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        thumbnailPath = await saveMedia(id, "thumbnail.png", bytes);
+      }
+    } catch {
+      // best-effort; card falls back to the icon
+    }
+  }
+
+  const record: VideoRecord = {
+    id,
+    videoName: `${ref.owner}/${ref.repo}`,
+    sourceType: "github",
+    sourceUrl: info.htmlUrl,
+    localPath: "",
+    mimeType: "application/github",
+    sizeBytes: 0,
+    addedAt: new Date().toISOString(),
+    thumbnailPath,
+    durationSec: null,
+    tags: [],
+    customInstructions: null,
+    customDiagramInstructions: null,
+    geminiName: null,
+    geminiUri: null,
+    summary: null,
+    summaryPrompt: null,
+    summaryModel: null,
+    summarizedAt: null,
+    summaryInputTokens: null,
+    summaryOutputTokens: null,
+    summaryCostUsd: null,
+    diagramPath: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
+    repoInfo: info,
+    repoDigests: [],
+  };
+  await upsert(record);
+  return record;
+}
+
+/** Refresh a GitHub record's repo metadata. */
+export async function refreshRepoInfo(record: VideoRecord, token: string): Promise<void> {
+  if (!record.repoInfo) return;
+  record.repoInfo = await fetchRepoInfo(
+    { owner: record.repoInfo.owner, repo: record.repoInfo.repo },
+    token
+  );
+  await upsert(record);
+}
+
+/** Prepend a new digest onto the record. */
+export async function addRepoDigest(record: VideoRecord, digest: RepoDigest): Promise<void> {
+  record.repoDigests = [digest, ...(record.repoDigests ?? [])];
+  await upsert(record);
+}
+
+/** Remove a digest from the record. */
+export async function removeRepoDigest(record: VideoRecord, digestId: string): Promise<void> {
+  record.repoDigests = (record.repoDigests ?? []).filter((d) => d.id !== digestId);
+  await upsert(record);
 }
 
 /**

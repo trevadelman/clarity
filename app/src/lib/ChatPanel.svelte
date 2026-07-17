@@ -2,7 +2,7 @@
   import { fly, fade } from "svelte/transition";
   import { tick } from "svelte";
   import { marked } from "marked";
-  import { MessageCircle, X, Send, Trash2, Film } from "lucide-svelte";
+  import { MessageCircle, X, Send, Trash2, Film, Search, ChevronDown } from "lucide-svelte";
   import type { ChatMessage } from "$lib/gemini";
 
   interface Props {
@@ -25,18 +25,29 @@
      * [VIDEO:id] citations as links to `/video/<id>`.
      */
     videoNames?: Record<string, string> | null;
+    /** Live research status line (e.g. "Reading src/lib/media.ts…"). */
+    toolStatus?: string | null;
   }
 
   let {
     title, messages, onAsk, onClear, onSeek, disabled = false,
     emptyHint = "Ask anything about this video.",
     videoNames = null,
+    toolStatus = null,
   }: Props = $props();
 
   let open = $state(false);
   let question = $state("");
   let busy = $state(false);
   let scrollEl = $state<HTMLElement | null>(null);
+  let openTrails = $state<Set<number>>(new Set());
+
+  function toggleTrail(i: number) {
+    const next = new Set(openTrails);
+    if (next.has(i)) next.delete(i);
+    else next.add(i);
+    openTrails = next;
+  }
 
   const totalCost = $derived(
     messages.reduce((sum, m) => sum + (m.costUsd ?? 0), 0)
@@ -137,12 +148,31 @@
           {#if m.role === "user"}
             <div class="bubble user">{m.text}</div>
           {:else}
-            <div class="bubble model markdown">{@html renderMessage(m.text)}</div>
+            <div class="model-wrap">
+              {#if m.toolCalls?.length}
+                <button class="trail-toggle" onclick={() => toggleTrail(i)} aria-expanded={openTrails.has(i)}>
+                  <Search size={11} />
+                  Researched · {m.toolCalls.length} step{m.toolCalls.length === 1 ? "" : "s"}
+                  <span class="trail-chev" class:open={openTrails.has(i)}><ChevronDown size={11} /></span>
+                </button>
+                {#if openTrails.has(i)}
+                  <ol class="trail" transition:fade={{ duration: 100 }}>
+                    {#each m.toolCalls as step, j (j)}
+                      <li>{step}</li>
+                    {/each}
+                  </ol>
+                {/if}
+              {/if}
+              <div class="bubble model markdown">{@html renderMessage(m.text)}</div>
+            </div>
           {/if}
         </div>
       {/each}
       {#if busy}
         <div class="msg model"><div class="bubble model thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div>
+        {#if toolStatus}
+          <div class="tool-status" transition:fade={{ duration: 100 }}>{toolStatus}</div>
+        {/if}
       {/if}
     </div>
 
@@ -292,6 +322,43 @@
   .dot:nth-child(2) { animation-delay: 0.2s; }
   .dot:nth-child(3) { animation-delay: 0.4s; }
   @keyframes blink { 0%, 80%, 100% { opacity: 0.3; } 40% { opacity: 1; } }
+
+  .model-wrap { display: flex; flex-direction: column; gap: 0.25rem; max-width: 88%; }
+  .model-wrap .bubble { max-width: 100%; }
+  .trail-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    align-self: flex-start;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    font-family: "JetBrains Mono", monospace;
+    cursor: pointer;
+    padding: 0.1rem 0.2rem;
+  }
+  .trail-toggle:hover { color: var(--text); }
+  .trail-chev { display: inline-flex; transition: transform 0.15s; }
+  .trail-chev.open { transform: rotate(180deg); }
+  .trail {
+    margin: 0 0 0.15rem;
+    padding: 0.45rem 0.6rem 0.45rem 1.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    font-size: 0.72rem;
+    font-family: "JetBrains Mono", monospace;
+    color: var(--text-dim);
+    line-height: 1.6;
+  }
+
+  .tool-status {
+    font-size: 0.76rem;
+    color: var(--text-dim);
+    font-family: "JetBrains Mono", monospace;
+    padding-left: 0.4rem;
+  }
 
   .markdown :global(p) { margin: 0.3rem 0; }
   .markdown :global(p:first-child) { margin-top: 0; }

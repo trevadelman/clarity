@@ -20,7 +20,9 @@
       "allow": [
         { "url": "https://*.loom.com/*" },
         { "url": "https://loom.com/*" },
-        { "url": "https://cdn.loom.com/*" }
+        { "url": "https://cdn.loom.com/*" },
+        { "url": "https://api.github.com/*" },
+        { "url": "https://opengraph.githubassets.com/*" }
       ]
     },
     "fs:default",

@@ -13,18 +13,27 @@
     Film, Camera, Play, SlidersHorizontal, ChevronDown,
   } from "lucide-svelte";
 
-  import { loadApiKey, loadPrompt, loadDiagramPrompt } from "$lib/settings";
+  import {
+    loadApiKey, loadPrompt, loadDiagramPrompt, loadGitHubToken,
+    loadMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
+  } from "$lib/settings";
   import {
     DEFAULT_MODEL, type Status, generateSummary, generateDiagram,
-    generateChatReply, composePrompt, type ChatMessage, type GeminiFile,
+    generateChatReply, generateRepoChatReply, composePrompt,
+    type ChatMessage, type GeminiFile,
   } from "$lib/gemini";
+  import {
+    fetchCommitsSince, fetchCommitDetail, fetchFileContent,
+    fetchDirectory, searchCode, type RepoRef,
+  } from "$lib/github";
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
-    saveChat, isYouTube, isLoom, parseYouTubeId,
+    saveChat, isYouTube, isLoom, isGitHub, parseYouTubeId,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import ChatPanel from "$lib/ChatPanel.svelte";
+  import RepoActivity from "$lib/RepoActivity.svelte";
   import { captureFrame, sampleFrames } from "$lib/frames";
 
   import { mediaSrc, mediaAbsPath } from "$lib/media";
@@ -35,6 +44,8 @@
   let record = $state<VideoRecord | null>(null);
   let loaded = $state(false);
   let apiKey = $state("");
+  let githubToken = $state("");
+  let maxToolTurns = $state(DEFAULT_MAX_TOOL_TURNS);
   let prompt = $state("");
   let diagramPrompt = $state("");
   const model = DEFAULT_MODEL;
@@ -52,8 +63,12 @@
   let diagramRunning = $state(false);
   let renderingIds = $state<Set<string>>(new Set());
 
+  type DetailTab = "summary" | "diagram" | "highlights";
+  let activeTab = $state<DetailTab>("summary");
+
   let playerEl = $state<HTMLVideoElement | null>(null);
   let chatMessages = $state<ChatMessage[]>([]);
+  let chatToolStatus = $state<string | null>(null);
 
   // Resolved asset-protocol URLs for disk-backed media (paths are async).
   let diagramUrl = $state("");
@@ -63,6 +78,7 @@
 
   const id = $derived($page.params.id ?? "");
   const isYt = $derived(record ? isYouTube(record) : false);
+  const isRepo = $derived(record ? isGitHub(record) : false);
   const ytId = $derived(record?.sourceUrl ? parseYouTubeId(record.sourceUrl) : null);
   // Reactive start offset so "Jump" can reload the embed at a timestamp.
   let ytStart = $state<number | null>(null);
@@ -97,21 +113,28 @@
 
   onMount(async () => {
     apiKey = await loadApiKey();
+    githubToken = await loadGitHubToken();
+    maxToolTurns = await loadMaxToolTurns();
     prompt = await loadPrompt();
     diagramPrompt = await loadDiagramPrompt();
     record = await getVideo(id);
     customInstructions = record?.customInstructions ?? "";
     customDiagramInstructions = record?.customDiagramInstructions ?? "";
     chatMessages = record?.chat ?? [];
+    // Default to the first tab that actually has content.
+    if (record && !record.summary) {
+      if (record.diagramPath) activeTab = "diagram";
+      else if (record.highlights.length > 0) activeTab = "highlights";
+    }
     loaded = true;
     gemStatus =
-      record && apiKey && !isYouTube(record)
+      record && apiKey && !isYouTube(record) && !isGitHub(record)
         ? await checkGeminiStatus(apiKey, record)
         : "missing";
     // Auto-render any highlights still missing their local media (e.g. captured
     // on an older build or interrupted mid-run). This costs only compute.
     // YouTube sources have no local file to capture frames from.
-    if (record && !isYouTube(record) && record.highlights.some((h) => !h.mediaPath)) {
+    if (record && !isYouTube(record) && !isGitHub(record) && record.highlights.some((h) => !h.mediaPath)) {
       await renderAllHighlights();
     }
     await resolveMediaUrls();
@@ -347,30 +370,83 @@
     record = await getVideo(id);
   }
 
-  /**
-   * Answer a chat question, grounded in the summary. YouTube records attach
-   * their URL so Gemini can consult the video; local files only attach when
-   * already ACTIVE on Gemini (avoids surprise re-uploads mid-chat).
-   */
+  /** Execute one GitHub research tool call on behalf of the repo chat. */
+  async function runRepoTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const info = record?.repoInfo;
+    if (!info) throw new Error("Repo metadata missing.");
+    const ref: RepoRef = { owner: info.owner, repo: info.repo };
+    switch (name) {
+      case "list_commits": {
+        const days = Math.max(1, Math.min(365, Number(args.since_days) || 7));
+        const since = new Date(Date.now() - days * 86_400_000).toISOString();
+        return fetchCommitsSince(ref, since, githubToken);
+      }
+      case "get_commit_diff":
+        return fetchCommitDetail(ref, String(args.sha), githubToken);
+      case "read_file":
+        return fetchFileContent(ref, String(args.path), githubToken);
+      case "list_directory":
+        return fetchDirectory(ref, String(args.path ?? ""), githubToken);
+      case "search_code":
+        return searchCode(ref, String(args.query), githubToken);
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  }
+
+  /** Agentic repo Q&A: Gemini researches the repo with live GitHub tools. */
+  async function askRepo(
+    question: string
+  ): Promise<{ text: string; costUsd: number; toolCalls?: string[] }> {
+    const info = record!.repoInfo!;
+    const repoContext =
+      `GitHub repository: ${info.owner}/${info.repo}\n` +
+      (info.description ? `Description: ${info.description}\n` : "") +
+      (info.language ? `Primary language: ${info.language}\n` : "") +
+      `Default branch: ${info.defaultBranch}\n` +
+      (info.pushedAt ? `Last push: ${info.pushedAt}\n` : "");
+    try {
+      const reply = await generateRepoChatReply(
+        apiKey, question, chatMessages.slice(0, -1),
+        repoContext, record!.repoDigests ?? [],
+        runRepoTool, (label) => (chatToolStatus = label), maxToolTurns
+      );
+      return { text: reply.text, costUsd: reply.usage.costUsd, toolCalls: reply.toolCalls };
+    } finally {
+      chatToolStatus = null;
+    }
+  }
+
+  /** Video Q&A grounded in the summary (attaching the video when active). */
+  async function askVideo(
+    question: string
+  ): Promise<{ text: string; costUsd: number; toolCalls?: string[] }> {
+    let file: GeminiFile | null = null;
+    if (isYt || gemStatus === "active") {
+      file = await ensureActiveFile(apiKey, record!, () => {});
+    }
+    const reply = await generateChatReply(
+      apiKey, question, chatMessages.slice(0, -1),
+      record!.summary ?? "", record!.videoName, file
+    );
+    return { text: reply.text, costUsd: reply.usage.costUsd };
+  }
+
   async function handleAsk(question: string) {
     if (!record) return;
     const userMsg: ChatMessage = { role: "user", text: question, at: new Date().toISOString() };
     chatMessages = [...chatMessages, userMsg];
     try {
-      let file: GeminiFile | null = null;
-      if (isYt || gemStatus === "active") {
-        file = await ensureActiveFile(apiKey, record, () => {});
-      }
-      const reply = await generateChatReply(
-        apiKey, question, chatMessages.slice(0, -1),
-        record.summary ?? "", record.videoName, file
-      );
+      const reply = isRepo && record.repoInfo
+        ? await askRepo(question)
+        : await askVideo(question);
       const modelMsg: ChatMessage = {
         role: "model",
         text: reply.text,
         at: new Date().toISOString(),
-        costUsd: reply.usage.costUsd,
+        costUsd: reply.costUsd,
       };
+      if (reply.toolCalls?.length) modelMsg.toolCalls = reply.toolCalls;
       chatMessages = [...chatMessages, modelMsg];
       await saveChat(record, chatMessages);
     } catch (err) {
@@ -408,6 +484,9 @@
     <button class="btn danger" onclick={handleDelete}><Trash2 size={15} /> Delete</button>
   </header>
 
+  {#if isRepo}
+    <RepoActivity {record} {apiKey} {githubToken} />
+  {:else}
   <div class="player card">
     {#if isYt}
       <iframe
@@ -561,8 +640,41 @@
       {/if}
     </div>
   </section>
+  {/if}
 
-  {#if record.summary}
+  {#if !isRepo && (record.summary || record.diagramPath || record.highlights.length > 0)}
+    <nav class="tabs" in:fade={{ duration: 150 }}>
+      <button
+        class="tab"
+        class:on={activeTab === "summary"}
+        onclick={() => (activeTab = "summary")}
+        disabled={!record.summary}
+      >
+        <Sparkles size={14} /> Summary
+      </button>
+      <button
+        class="tab"
+        class:on={activeTab === "diagram"}
+        onclick={() => (activeTab = "diagram")}
+        disabled={!record.diagramPath}
+      >
+        <ImageIcon size={14} /> Diagram
+      </button>
+      <button
+        class="tab"
+        class:on={activeTab === "highlights"}
+        onclick={() => (activeTab = "highlights")}
+        disabled={record.highlights.length === 0}
+      >
+        <Film size={14} /> Highlights
+        {#if record.highlights.length > 0}
+          <span class="tab-count">{record.highlights.length}</span>
+        {/if}
+      </button>
+    </nav>
+  {/if}
+
+  {#if record.summary && activeTab === "summary"}
     <section class="card" in:fly={{ y: 16, duration: 300 }}>
       <div class="summary-head">
         <h2><Sparkles size={16} /> Summary</h2>
@@ -587,7 +699,7 @@
     </section>
   {/if}
 
-  {#if record.diagramPath}
+  {#if record.diagramPath && activeTab === "diagram"}
     <section class="card" in:fly={{ y: 16, duration: 300 }}>
       <div class="summary-head">
         <h2><ImageIcon size={16} /> Diagram</h2>
@@ -608,7 +720,7 @@
   {/if}
 
 
-  {#if record.highlights.length > 0}
+  {#if record.highlights.length > 0 && activeTab === "highlights"}
     <section class="card" in:fly={{ y: 16, duration: 300 }}>
       <div class="summary-head">
         <h2><Film size={16} /> Highlights</h2>
@@ -665,9 +777,12 @@
     onClear={handleClearChat}
     onSeek={(sec) => seekPlayer(sec)}
     disabled={!apiKey}
-    emptyHint={record.summary
-      ? "Ask anything about this video — answers include clickable timestamps."
-      : "Summarize the video first for the best answers, or ask away."}
+    toolStatus={chatToolStatus}
+    emptyHint={isRepo
+      ? "Ask about this repo — I can read files, commits, and diffs on demand."
+      : record.summary
+        ? "Ask anything about this video — answers include clickable timestamps."
+        : "Summarize the video first for the best answers, or ask away."}
   />
 
   {#if lightbox}
@@ -850,6 +965,43 @@
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
   .btn.danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
   .btn.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+
+  .tabs {
+    display: flex;
+    gap: 0.35rem;
+    margin-top: 1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.55rem 0.9rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.88rem;
+    font-family: inherit;
+    cursor: pointer;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .tab :global(svg) { color: currentColor; }
+  .tab:hover:not(:disabled) { color: var(--text); }
+  .tab.on {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+  .tab:disabled { opacity: 0.4; cursor: not-allowed; }
+  .tab-count {
+    font-size: 0.7rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
 
   .summary-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.3rem; gap: 1rem; }
   .summary { margin-top: 0.7rem; line-height: 1.6; }

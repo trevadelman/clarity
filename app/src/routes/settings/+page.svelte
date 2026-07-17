@@ -1,27 +1,53 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw } from "lucide-svelte";
+  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw, GitBranch, Info, DollarSign, Trash2, Wrench } from "lucide-svelte";
   import {
     loadApiKey, saveApiKey, loadPrompt, savePrompt,
     loadDiagramPrompt, saveDiagramPrompt,
+    loadGitHubToken, saveGitHubToken,
+    loadMaxToolTurns, saveMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
   } from "$lib/settings";
   import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "$lib/gemini";
+  import { loadSpend, resetSpend, type SpendInfo } from "$lib/spend";
   import { checkForUpdate, installUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
 
   let apiKey = $state("");
+  let githubToken = $state("");
   let prompt = $state(DEFAULT_PROMPT);
   let diagramPrompt = $state(DEFAULT_DIAGRAM_PROMPT);
   let version = $state("");
   let checking = $state(false);
+  let tokenHelpOpen = $state(false);
+  let spend = $state<SpendInfo>({ totalUsd: 0, since: null });
+  let maxToolTurns = $state(DEFAULT_MAX_TOOL_TURNS);
 
   onMount(async () => {
     apiKey = await loadApiKey();
+    githubToken = await loadGitHubToken();
     prompt = await loadPrompt();
     diagramPrompt = await loadDiagramPrompt();
     version = await getVersion();
+    spend = await loadSpend();
+    maxToolTurns = await loadMaxToolTurns();
   });
+
+  async function handleSaveMaxToolTurns() {
+    maxToolTurns = Math.max(1, Math.min(25, Math.round(maxToolTurns) || DEFAULT_MAX_TOOL_TURNS));
+    await saveMaxToolTurns(maxToolTurns);
+    toast.success("Tool call limit saved.");
+  }
+
+  async function handleResetSpend() {
+    await resetSpend();
+    spend = await loadSpend();
+    toast.success("Spend tracker reset.");
+  }
+
+  function fmtSpend(usd: number): string {
+    return usd < 0.01 && usd > 0 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+  }
 
   async function handleCheckUpdates() {
     checking = true;
@@ -44,6 +70,10 @@
   async function handleSaveKey() {
     await saveApiKey(apiKey.trim());
     toast.success("API key saved.");
+  }
+  async function handleSaveGitHubToken() {
+    await saveGitHubToken(githubToken.trim());
+    toast.success("GitHub token saved.");
   }
   async function handleSavePrompt() {
     await savePrompt(prompt);
@@ -71,7 +101,21 @@
 </header>
 
 <section class="card">
-  <div class="card-head"><KeyRound size={17} /><h2>Gemini API Key</h2></div>
+  <div class="card-head">
+    <KeyRound size={17} /><h2>Gemini</h2>
+    <span class="spend-inline mono" title={spend.since ? `Since ${new Date(spend.since).toLocaleDateString()}` : ""}>
+      <DollarSign size={13} /> {fmtSpend(spend.totalUsd)} spent
+    </span>
+    <button
+      class="spend-reset"
+      onclick={handleResetSpend}
+      disabled={spend.totalUsd === 0}
+      title="Reset spend tracker"
+      aria-label="Reset spend tracker"
+    >
+      <Trash2 size={13} />
+    </button>
+  </div>
   <div class="row">
     <input
       type="password"
@@ -83,6 +127,61 @@
     </button>
   </div>
   <p class="hint">Stored locally via plugin-store. Never bundled or committed.</p>
+  <div class="row sub-row">
+    <span class="sub-label"><Wrench size={14} /> Repo chat tool limit</span>
+    <input class="num" type="number" min="1" max="25" bind:value={maxToolTurns} />
+    <button class="btn" onclick={handleSaveMaxToolTurns}><Save size={14} /> Save</button>
+  </div>
+  <p class="hint">
+    Max research rounds (file reads, diffs, searches) per repo-chat question.
+    Higher digs deeper but costs more. Default {DEFAULT_MAX_TOOL_TURNS}. The
+    spend total above tracks all estimated Gemini costs — even for replaced or
+    deleted work.
+  </p>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <GitBranch size={17} /><h2>GitHub Token</h2>
+    <button
+      class="info-btn"
+      onclick={() => (tokenHelpOpen = !tokenHelpOpen)}
+      aria-expanded={tokenHelpOpen}
+      aria-label="How to get a GitHub token"
+    >
+      <Info size={15} />
+    </button>
+  </div>
+  {#if tokenHelpOpen}
+    <div class="info-pop">
+      <p><strong>Two ways to get a token:</strong></p>
+      <p>
+        <strong>1. GitHub CLI (fastest).</strong> If you use <code>gh</code>, run
+        <code>gh auth token</code> in a terminal and paste the result here. It reuses
+        your existing login (dies if you <code>gh auth logout</code>).
+      </p>
+      <p>
+        <strong>2. Fine-grained PAT (web).</strong> Go to
+        <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">
+          github.com/settings/personal-access-tokens/new</a>, pick the repos to track, and
+        grant read-only <em>Contents</em> and <em>Metadata</em> permissions.
+      </p>
+    </div>
+  {/if}
+  <div class="row">
+    <input
+      type="password"
+      placeholder="Personal access token (optional)"
+      bind:value={githubToken}
+    />
+    <button class="btn primary" onclick={handleSaveGitHubToken}>
+      <Save size={15} /> Save
+    </button>
+  </div>
+  <p class="hint">
+    Optional for public repos; required for private repos and higher rate
+    limits. A fine-grained token with read-only Contents access is enough.
+  </p>
 </section>
 
 <section class="card">
@@ -173,5 +272,89 @@
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0.6rem 0 0; }
+
+  .info-btn {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .info-btn:hover, .info-btn[aria-expanded="true"] {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+  .info-pop {
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    background: color-mix(in srgb, var(--accent) 5%, var(--bg));
+    border-radius: var(--radius-sm);
+    padding: 0.7rem 0.85rem;
+    margin-bottom: 0.8rem;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    color: var(--text-dim);
+  }
+  .info-pop p { margin: 0 0 0.5rem; }
+  .info-pop p:last-child { margin-bottom: 0; }
+  .info-pop strong { color: var(--text); }
+  .info-pop code {
+    background: var(--hover);
+    padding: 0.08rem 0.3rem;
+    border-radius: 4px;
+    font-size: 0.9em;
+    font-family: "JetBrains Mono", monospace;
+  }
+  .info-pop a { color: var(--accent); }
   .version { font-size: 0.92rem; font-weight: 500; flex: 1; }
+
+  input.num { flex: 0 0 80px; width: 80px; }
+  .mono { font-family: "JetBrains Mono", monospace; }
+
+  .spend-inline {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background: var(--hover);
+  }
+  .spend-inline :global(svg) { color: var(--text-dim); }
+  .spend-reset {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .spend-reset:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+  .spend-reset:disabled { opacity: 0.35; cursor: not-allowed; }
+
+  .sub-row {
+    margin-top: 0.9rem;
+    padding-top: 0.9rem;
+    border-top: 1px solid var(--border);
+  }
+  .sub-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.86rem;
+    color: var(--text-dim);
+    flex: 1;
+  }
+  .sub-label :global(svg) { color: var(--accent); }
 </style>

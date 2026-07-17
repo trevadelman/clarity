@@ -2,9 +2,9 @@
   import { onMount } from "svelte";
   import { fly, fade } from "svelte/transition";
   import { confirm } from "@tauri-apps/plugin-dialog";
-  import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X } from "lucide-svelte";
+  import { Plus, Film, Sparkles, Cloud, Trash2, Search, Tag, X, FolderGit2, Star, Video } from "lucide-svelte";
   import {
-    listVideos, listAllTags, clearAll, isYouTube, isLoom,
+    listVideos, listAllTags, clearAll, isYouTube, isLoom, isGitHub,
     loadLibraryChat, saveLibraryChat, type VideoRecord,
   } from "$lib/videoLibrary";
   import { generateLibraryChatReply, type ChatMessage } from "$lib/gemini";
@@ -25,10 +25,25 @@
 
   let query = $state("");
   let activeTags = $state<string[]>([]);
+  let typeFilter = $state<"all" | "video" | "youtube" | "repo">("all");
+
+  /** Coarse source kind used for the type filter and card visuals. */
+  function kindOf(v: VideoRecord): "video" | "youtube" | "repo" {
+    if (isGitHub(v)) return "repo";
+    if (isYouTube(v)) return "youtube";
+    return "video";
+  }
+
+  const counts = $derived.by(() => {
+    const c = { all: videos.length, video: 0, youtube: 0, repo: 0 };
+    for (const v of videos) c[kindOf(v)]++;
+    return c;
+  });
 
   const filtered = $derived.by(() => {
     const q = query.trim().toLowerCase();
     return videos.filter((v) => {
+      if (typeFilter !== "all" && kindOf(v) !== typeFilter) return false;
       const matchesQuery =
         q === "" ||
         v.videoName.toLowerCase().includes(q) ||
@@ -69,6 +84,7 @@
   function clearFilters() {
     query = "";
     activeTags = [];
+    typeFilter = "all";
   }
 
   async function refresh() {
@@ -164,13 +180,13 @@
     <h1>Library</h1>
     <p class="sub">
       {#if loaded && videos.length > 0}
-        {videos.length} video{videos.length === 1 ? "" : "s"} stored locally
+        {counts.video + counts.youtube} video{counts.video + counts.youtube === 1 ? "" : "s"}{counts.repo > 0 ? ` · ${counts.repo} repo${counts.repo === 1 ? "" : "s"}` : ""} stored locally
       {:else}
-        Your locally-stored whiteboard sessions
+        Your locally-stored sessions & sources
       {/if}
     </p>
   </div>
-  <a class="btn primary" href="/add"><Plus size={16} /> Add video</a>
+  <a class="btn primary" href="/add"><Plus size={16} /> Add source</a>
 </header>
 
 {#if !loaded}
@@ -197,6 +213,26 @@
         </button>
       {/if}
     </div>
+    {#if counts.repo > 0 || counts.youtube > 0}
+      <div class="type-filter">
+        <button class="chip" class:on={typeFilter === "all"} onclick={() => (typeFilter = "all")}>
+          All ({counts.all})
+        </button>
+        <button class="chip" class:on={typeFilter === "video"} onclick={() => (typeFilter = "video")}>
+          <Video size={11} /> Videos ({counts.video})
+        </button>
+        {#if counts.youtube > 0}
+          <button class="chip" class:on={typeFilter === "youtube"} onclick={() => (typeFilter = "youtube")}>
+            <Film size={11} /> YouTube ({counts.youtube})
+          </button>
+        {/if}
+        {#if counts.repo > 0}
+          <button class="chip" class:on={typeFilter === "repo"} onclick={() => (typeFilter = "repo")}>
+            <FolderGit2 size={11} /> Repos ({counts.repo})
+          </button>
+        {/if}
+      </div>
+    {/if}
     {#if allTags.length > 0}
       <div class="tag-filter">
         {#each allTags as t (t)}
@@ -204,7 +240,7 @@
             <Tag size={11} /> {t}
           </button>
         {/each}
-        {#if query || activeTags.length > 0}
+        {#if query || activeTags.length > 0 || typeFilter !== "all"}
           <button class="chip clear" onclick={clearFilters}>Clear</button>
         {/if}
       </div>
@@ -221,11 +257,18 @@
     {#each filtered as v, i (v.id)}
       <li in:fly={{ y: 14, duration: 240, delay: i * 40 }}>
         <a class="card" href={`/video/${v.id}`}>
-          <div class="thumb">
+          <div class="thumb" class:repo-thumb={isGitHub(v)}>
             {#if thumbUrls[v.id]}
               <img src={thumbUrls[v.id]} alt="" />
+            {:else if isGitHub(v)}
+              <span class="thumb-fallback repo-icon"><FolderGit2 size={32} /></span>
+              {#if v.repoInfo}
+                <span class="repo-facts">
+                  {#if v.repoInfo.language}<span>{v.repoInfo.language}</span>{/if}
+                  <span><Star size={11} /> {v.repoInfo.stars.toLocaleString()}</span>
+                </span>
+              {/if}
             {:else}
-
               <span class="thumb-fallback"><Film size={28} /></span>
             {/if}
             {#if formatDuration(v.durationSec)}
@@ -235,7 +278,7 @@
           <div class="body">
             <div class="title">{v.videoName}</div>
             <div class="meta">
-              {isYouTube(v) ? "YouTube" : fmtSize(v.sizeBytes)} · {relTime(v.addedAt)}
+              {isYouTube(v) ? "YouTube" : isGitHub(v) ? "GitHub repo" : fmtSize(v.sizeBytes)} · {relTime(v.addedAt)}
             </div>
             {#if summarySnippet(v)}
               {@const s = summarySnippet(v)!}
@@ -249,12 +292,20 @@
               </div>
             {/if}
             <div class="badges">
-              {#if v.summary}
+              {#if isGitHub(v)}
+                {#if (v.repoDigests ?? []).length > 0}
+                  <span class="badge ok"><Sparkles size={12} /> {(v.repoDigests ?? []).length} digest{(v.repoDigests ?? []).length === 1 ? "" : "s"}</span>
+                {:else}
+                  <span class="badge">No digests yet</span>
+                {/if}
+              {:else if v.summary}
                 <span class="badge ok"><Sparkles size={12} /> Summarized</span>
               {:else}
                 <span class="badge">Not summarized</span>
               {/if}
-              {#if isYouTube(v)}
+              {#if isGitHub(v)}
+                <span class="badge repo">GitHub</span>
+              {:else if isYouTube(v)}
                 <span class="badge yt">YouTube</span>
               {:else if isLoom(v)}
                 <span class="badge loom">Loom</span>
@@ -411,6 +462,23 @@
   }
   .thumb img { width: 100%; height: 100%; object-fit: cover; }
   .thumb-fallback { color: var(--text-dim); }
+  .repo-thumb {
+    background: linear-gradient(135deg,
+      color-mix(in srgb, #8957e5 14%, var(--hover)),
+      var(--hover));
+  }
+  .repo-icon { color: #a371f7; }
+  .repo-facts {
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    display: flex;
+    gap: 0.6rem;
+    font-size: 0.72rem;
+    color: var(--text-dim);
+  }
+  .repo-facts span { display: inline-flex; align-items: center; gap: 0.2rem; }
+  .type-filter { display: flex; flex-wrap: wrap; gap: 0.4rem; }
   .duration {
     position: absolute;
     bottom: 6px;
@@ -474,6 +542,7 @@
   .badge.gem { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
   .badge.yt { background: color-mix(in srgb, #ff0033 14%, transparent); color: #e5254c; }
   .badge.loom { background: color-mix(in srgb, #625df5 16%, transparent); color: #7a76ff; }
+  .badge.repo { background: color-mix(in srgb, #8957e5 16%, transparent); color: #a371f7; }
 
   .skeleton {
     aspect-ratio: 16 / 9;

@@ -45,15 +45,19 @@ items below are everything that remains.
   - **Windows job** (`windows-latest`): `npm run tauri build` produces NSIS
     `.exe` / `.msi` + updater artifact.
 
-## Phase 3 — Windows code signing (DigiCert KeyLocker, EV)
+## Phase 3 — Windows code signing (DigiCert KeyLocker, EV) ✅
 
-- [ ] DigiCert One → KeyLocker: create API token + client auth certificate.
-- [ ] CI: install DigiCert `smctl`, sync certs, configure Tauri's
-  `bundle.windows.signCommand` to route signing through KeyLocker
-  (EV = immediate SmartScreen reputation; 1000 signatures purchased —
-  each release signs ~3–4 files).
-- [ ] Secrets: `SM_API_KEY`, `SM_CLIENT_CERT_FILE` (base64),
-  `SM_CLIENT_CERT_PASSWORD`, `SM_HOST`, cert fingerprint.
+- [x] DigiCert One → KeyLocker: API token + client auth certificate
+  (`github-actions-signing`). Gotcha: must be created in **DigiCert One**
+  (one.digicert.com), NOT CertCentral — see
+  `~/xeto-dev/windows-code-signing.md`.
+- [x] CI: DigiCert `ssm-code-signing` action, `smctl` healthcheck +
+  certsync, Tauri `bundle.windows.signCommand` → KeyLocker.
+- [x] Secrets set: `SM_API_KEY`, `SM_CLIENT_CERT_FILE` (base64),
+  `SM_CLIENT_CERT_PASSWORD`, `SM_HOST`, `SM_CODE_SIGNING_CERT_SHA1_HASH`.
+- [x] Signature quota trimmed from 11 → **2 per release** (NSIS-only
+  targets + selective `.github/sign.cmd` skipping embedded NSIS plugin
+  DLLs and the uninstaller stub). Verified in run 29764105553.
 
 ## Phase 4 — Release integration
 

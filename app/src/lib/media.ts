@@ -47,9 +47,13 @@ export async function saveMedia(
   return `${MEDIA_DIR}/${videoId}/${filename}`;
 }
 
-/** Resolve a stored relative media path to an absolute filesystem path. */
+/**
+ * Resolve a stored relative media path to an absolute filesystem path.
+ * Stored paths always use `/` separators (portable store keys); split into
+ * segments so `join` assembles them with the OS-native separator.
+ */
 export async function mediaAbsPath(relativePath: string): Promise<string> {
-  return join(await appDataDir(), relativePath);
+  return join(await appDataDir(), ...relativePath.split("/"));
 }
 
 /**

@@ -1,0 +1,78 @@
+# Windows Support Roadmap
+
+Goal: ship Clarity for Windows (x64) alongside macOS, signed with the
+Xetobase DigiCert EV certificate (KeyLocker cloud signing), built in CI.
+
+The codebase is already ~98% OS-agnostic: no shell commands, no native
+sidecar binaries, all I/O via Tauri's cross-platform plugins (`fs`, `path`,
+`store`, `dialog`, `http`) and browser APIs (canvas frame capture). The
+items below are everything that remains.
+
+---
+
+## Phase 1 — Cross-platform code fixes (do first, safe on macOS)
+
+- [x] **`videoLibrary.ts` / `addVideo()`**: filename derived with
+  `sourcePath.split("/").pop()` — breaks on Windows paths
+  (`C:\Users\...\video.mp4`). Use `basename()` from `@tauri-apps/api/path`.
+- [x] **`media.ts` / `mediaAbsPath()`**: stored relative media paths use `/`
+  (portable store keys — keep that), but resolve them by splitting into
+  segments and spreading into `join()` so no mixed-separator string is ever
+  handed to the fs plugin.
+- [x] **`scripts/make-latest-json.mjs`**: generalize to emit multiple
+  platforms (`darwin-aarch64` + `windows-x86_64`), each platform included
+  only when its artifact + `.sig` are present. Mac-only flow must keep
+  working unchanged.
+- [x] `npm run check` (0 errors) + manifest script verified against the
+  v0.8.0 build output (emits `darwin-aarch64` only, as before). Full macOS
+  build re-verified at next release.
+
+## Phase 2 — Windows build in CI (GitHub Actions)
+
+- [ ] Workflow triggered on version tag push (`v*`):
+  - **macOS job** (`macos-latest`): sign + notarize. Secrets needed:
+    `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
+    Developer ID cert as base64 `.p12` (+ import into runner keychain),
+    `TAURI_SIGNING_PRIVATE_KEY`.
+  - **Windows job** (`windows-latest`): `npm run tauri build` produces NSIS
+    `.exe` / `.msi` + updater artifact.
+- [ ] Un-signed Windows build first — verify the app actually runs
+  (smoke-test on an AWS Windows instance).
+
+## Phase 3 — Windows code signing (DigiCert KeyLocker, EV)
+
+- [ ] DigiCert One → KeyLocker: create API token + client auth certificate.
+- [ ] CI: install DigiCert `smctl`, sync certs, configure Tauri's
+  `bundle.windows.signCommand` to route signing through KeyLocker
+  (EV = immediate SmartScreen reputation; 1000 signatures purchased —
+  each release signs ~3–4 files).
+- [ ] Secrets: `SM_API_KEY`, `SM_CLIENT_CERT_FILE` (base64),
+  `SM_CLIENT_CERT_PASSWORD`, `SM_HOST`, cert fingerprint.
+
+## Phase 4 — Release integration
+
+- [ ] Merge macOS + Windows entries into one `latest.json`; attach all
+  assets (DMG, `.app.tar.gz`, NSIS `.exe`, sigs, manifest) to the GitHub
+  release. Existing mac installs keep updating; Windows installs update via
+  `windows-x86_64`.
+- [ ] Update `docs/releasing.md` for the CI-based flow.
+
+## Phase 5 — Windows polish (post-first-ship)
+
+- [ ] Title bar: `titleBarStyle: Overlay` is macOS-only; Windows shows a
+  native title bar over the transparent drag strip. Decide: accept native
+  bar (fine) or use `decorations: false` + custom controls (later).
+- [ ] Verify drag-drop file paths, asset-protocol video playback (WebView2),
+  and store/media dirs on a real Windows machine.
+- [ ] Consider `webview2` bootstrapper options in the NSIS installer
+  (default "download bootstrapper" is fine for online users).
+
+## Known non-issues (verified in review)
+
+- URL building with `/` in `github.ts`, `videoLibrary.ts` — URLs, not file
+  paths; fine everywhere.
+- `$APPDATA/**` asset scope, `appDataDir()`, `join()` — resolve per-OS.
+- `icon.ico` already present; `bundle.targets: "all"` covers Windows.
+- WebView2 (Chromium) has broader codec support than macOS WebKit — video
+  playback is fine or better.
+- Gemini/GitHub/Loom/YouTube integrations are pure HTTPS — OS-agnostic.

@@ -2,6 +2,7 @@ import { load, type Store } from "@tauri-apps/plugin-store";
 import { fetch as httpFetch } from "@tauri-apps/plugin-http";
 import {
   appDataDir,
+  basename,
   join,
 } from "@tauri-apps/api/path";
 import {
@@ -581,7 +582,9 @@ export function mimeForName(name: string): string {
 
 /** Copy a chosen local video into app data and create a record. */
 export async function addVideo(sourcePath: string): Promise<VideoRecord> {
-  const videoName = sourcePath.split("/").pop() ?? sourcePath;
+  // `basename` handles both `/` and `\` separators (drag-drop on Windows
+  // yields `C:\...\video.mp4` paths).
+  const videoName = await basename(sourcePath);
   const ext = (videoName.split(".").pop() ?? "mp4").toLowerCase();
   const bytes = await readFile(sourcePath);
 

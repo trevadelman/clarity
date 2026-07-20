@@ -60,17 +60,21 @@ jobs:
           SM_HOST: ${{ secrets.SM_HOST }}
           SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
 
-      - name: Build Tauri app (signed, no updater artifacts)
+      - name: Build Tauri app (signed, NSIS only, no updater artifacts)
         # createUpdaterArtifacts requires TAURI_SIGNING_PRIVATE_KEY; this is a
         # test build with no release/manifest, so disable it via override.
+        # NSIS-only targets + selective sign.cmd keep KeyLocker usage at
+        # 2 signatures per build (app.exe + setup.exe).
         shell: bash
         run: |
+          signcmd="${GITHUB_WORKSPACE//\\//}/.github/sign.cmd"
           cat > test-build.conf.json <<EOF
           {
             "bundle": {
+              "targets": ["nsis"],
               "createUpdaterArtifacts": false,
               "windows": {
-                "signCommand": "smctl sign --fingerprint ${SM_CODE_SIGNING_CERT_SHA1_HASH} --input %1"
+                "signCommand": "cmd /C $signcmd %1"
               }
             }
           }
@@ -86,7 +90,5 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: clarity-windows-installers
-          path: |
-            app/src-tauri/target/release/bundle/nsis/*.exe
-            app/src-tauri/target/release/bundle/msi/*.msi
+          path: app/src-tauri/target/release/bundle/nsis/*.exe
           if-no-files-found: error

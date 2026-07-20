@@ -25,9 +25,65 @@ KeyLocker EV) — plus the merged `latest.json` the auto-updater consumes.
    ```
 5. Edit the auto-generated release notes if desired.
 
-All signing credentials live in GitHub repo secrets (`APPLE_*`, `SM_*`,
-`TAURI_SIGNING_PRIVATE_KEY`); see `~/xeto-dev/app-release-strategy.md` for
-what each is and how to rotate them.
+## What CI does per platform
+
+**macOS job** (`macos-latest`):
+- Imports the Developer ID certificate (base64 `.p12` secret) into a
+  throwaway keychain on the runner.
+- `tauri build` signs with hardened runtime, submits to Apple's notary
+  service, waits, and staples the ticket (minutes — Apple's queue).
+- Verifies with `spctl` (`accepted · source=Notarized Developer ID`) before
+  uploading. Artifacts: DMG + `Clarity.app.tar.gz` + `.sig`.
+
+**Windows job** (`windows-latest`):
+- Signs via DigiCert KeyLocker (EV cert in a cloud HSM — nothing to
+  install locally, instant SmartScreen trust, no notarization equivalent).
+- **Signatures are metered** (bought in blocks of 1000). The build is
+  deliberately trimmed to **2 per release**: NSIS-only bundling (no MSI)
+  and `.github/sign.cmd` which skips embedded NSIS plugin DLLs and the
+  uninstaller stub — Windows only validates `app.exe` and the outer
+  `setup.exe`. Don't revert to `targets: "all"` or a plain signCommand:
+  that costs 11 signatures per release for zero user-visible benefit.
+- Artifacts: `Clarity_X.Y.Z_x64-setup.exe` + `.sig`.
+
+**Release job** (`ubuntu-latest`): downloads both artifact sets, runs
+`app/scripts/make-latest-json.mjs` to build the merged manifest (each
+platform included only when its artifact + `.sig` exist), and publishes the
+GitHub release.
+
+## Secrets inventory (GitHub repo → Settings → Secrets)
+
+| Secret | What it is |
+|---|---|
+| `APPLE_CERTIFICATE` | base64 `.p12` export of the Developer ID Application identity |
+| `APPLE_CERTIFICATE_PASSWORD` | the `.p12` export password |
+| `APPLE_SIGNING_IDENTITY` | `Developer ID Application: Xetobase Inc (S3DGFW67TL)` |
+| `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` | notarization: Apple ID, app-specific password, team ID |
+| `SM_HOST` / `SM_API_KEY` | DigiCert KeyLocker endpoint + API token |
+| `SM_CLIENT_CERT_FILE` / `SM_CLIENT_CERT_PASSWORD` | base64 client-auth `.p12` + password (authenticates CI to KeyLocker) |
+| `SM_CODE_SIGNING_CERT_SHA1_HASH` | EV cert fingerprint `smctl` signs with |
+| `TAURI_SIGNING_PRIVATE_KEY` | updater manifest key (same key as `app/.tauri-keys/clarity.key`; empty password) |
+
+Secret *values*, rotation walkthroughs, and account details live outside
+this repo (maintainer's `~/xeto-dev/` docs).
+
+## FAQ / gotchas
+
+- **Windows CI signing fails with 403 "Invalid credentials"** → the DigiCert
+  client-auth cert or API token expired or was created in the wrong portal
+  (they must come from **DigiCert One**, not CertCentral). Rotate and update
+  the `SM_*` secrets.
+- **A `.sig` is missing and the release job errors** → the corresponding
+  build ran without `TAURI_SIGNING_PRIVATE_KEY`; check the job's env.
+- **Tag pushed with wrong version in configs** → delete the release + tag
+  (`gh release delete vX.Y.Z --cleanup-tag`), fix, re-tag.
+- **Why no MSI?** Only useful for enterprise GPO deployment; costs extra
+  metered signatures. Re-add `"msi"` to targets if a customer needs it.
+- **DigiCert signature quota** — check remaining at one.digicert.com
+  (KeyLocker dashboard). Expect exactly +2 per release.
+- **Both jobs must succeed** for anything to publish — a failure on either
+  platform means no release, no partial `latest.json` (existing installs
+  are never left pointing at a broken manifest).
 
 ---
 

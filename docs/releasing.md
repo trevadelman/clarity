@@ -65,7 +65,7 @@ GitHub release.
 | `TAURI_SIGNING_PRIVATE_KEY` | updater manifest key (same key as `app/.tauri-keys/clarity.key`; empty password) |
 
 Secret *values*, rotation walkthroughs, and account details live outside
-this repo (maintainer's `~/xeto-dev/` docs).
+this repo (maintainer’s local "Xetobase App Signing" vault).
 
 ## FAQ / gotchas
 

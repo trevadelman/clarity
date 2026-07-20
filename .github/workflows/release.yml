@@ -129,7 +129,7 @@ jobs:
 
       - name: Build Tauri app (NSIS only, KeyLocker-signed)
         # NSIS-only + selective sign.cmd = 2 metered signatures per release
-        # (app.exe + setup.exe). See ~/xeto-dev/windows-code-signing.md.
+        # (app.exe + setup.exe). See the local signing vault docs.
         shell: bash
         run: |
           signcmd="${GITHUB_WORKSPACE//\\//}/.github/sign.cmd"

@@ -48,7 +48,7 @@ items below are everything that remains.
 - [x] DigiCert One → KeyLocker: API token + client auth certificate
   (`github-actions-signing`). Gotcha: must be created in **DigiCert One**
   (one.digicert.com), NOT CertCentral — see
-  `~/xeto-dev/windows-code-signing.md`.
+  the maintainer’s local signing vault.
 - [x] CI: DigiCert `ssm-code-signing` action, `smctl` healthcheck +
   certsync, Tauri `bundle.windows.signCommand` → KeyLocker.
 - [x] Secrets set: `SM_API_KEY`, `SM_CLIENT_CERT_FILE` (base64),

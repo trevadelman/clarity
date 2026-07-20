@@ -25,3 +25,7 @@ app/src-tauri/icons/ios/
 # Tauri updater signing keys — NEVER commit the private key
 app/.tauri-keys/
 
+
+# Signing credentials — never commit
+*.p12
+.signing.env

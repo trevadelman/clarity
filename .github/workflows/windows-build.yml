@@ -1,4 +1,5 @@
-# Manual test build of Clarity for Windows (unsigned).
+# Manual test build of Clarity for Windows, Authenticode-signed via DigiCert
+# KeyLocker (EV cert, cloud HSM).
 #
 # Produces NSIS/MSI installers as workflow artifacts only — no release, no
 # latest.json, so existing installs never see an update banner from this.
@@ -34,13 +35,52 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build Tauri app (unsigned, no updater artifacts)
+      - name: Set up DigiCert KeyLocker client cert
+        shell: bash
+        run: |
+          echo "$SM_CLIENT_CERT_FILE_B64" | base64 -d > /d/client_cert.p12
+          echo "SM_CLIENT_CERT_FILE=D:\\client_cert.p12" >> "$GITHUB_ENV"
+        env:
+          SM_CLIENT_CERT_FILE_B64: ${{ secrets.SM_CLIENT_CERT_FILE }}
+
+      - name: Install DigiCert KeyLocker tools
+        uses: digicert/ssm-code-signing@v1.0.1
+        env:
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+
+      - name: KeyLocker healthcheck + cert sync
+        shell: cmd
+        run: |
+          smctl healthcheck
+          smctl windows certsync
+        env:
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+
+      - name: Build Tauri app (signed, no updater artifacts)
         # createUpdaterArtifacts requires TAURI_SIGNING_PRIVATE_KEY; this is a
         # test build with no release/manifest, so disable it via override.
         shell: bash
         run: |
-          echo '{"bundle":{"createUpdaterArtifacts":false}}' > test-build.conf.json
+          cat > test-build.conf.json <<EOF
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false,
+              "windows": {
+                "signCommand": "smctl sign --fingerprint ${SM_CODE_SIGNING_CERT_SHA1_HASH} --input %1"
+              }
+            }
+          }
+          EOF
           npm run tauri build -- --config test-build.conf.json
+        env:
+          SM_API_KEY: ${{ secrets.SM_API_KEY }}
+          SM_HOST: ${{ secrets.SM_HOST }}
+          SM_CLIENT_CERT_PASSWORD: ${{ secrets.SM_CLIENT_CERT_PASSWORD }}
+          SM_CODE_SIGNING_CERT_SHA1_HASH: ${{ secrets.SM_CODE_SIGNING_CERT_SHA1_HASH }}
 
       - name: Upload installers
         uses: actions/upload-artifact@v5

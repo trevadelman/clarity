@@ -1,9 +1,40 @@
 # Releasing Clarity (signed auto-update builds)
 
-This is the exact, repeatable process for cutting a new Clarity release that the
-in-app auto-updater can consume. Every release must ship three assets — the DMG
-(for first-time manual installs), the updater bundle (`Clarity.app.tar.gz`), and
-the signed manifest (`latest.json`) — or auto-update will break.
+Releases are cut by **CI** (`.github/workflows/release.yml`): push a version
+tag and GitHub Actions builds, signs, and publishes both platforms into one
+GitHub release — macOS (Developer ID + notarized) and Windows (DigiCert
+KeyLocker EV) — plus the merged `latest.json` the auto-updater consumes.
+
+## Per-release checklist (CI flow)
+
+1. Bump the version in `app/package.json` and
+   `app/src-tauri/tauri.conf.json` (must match), run `npm run check`,
+   commit and push.
+2. Tag and push:
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+3. Watch: `gh run watch` — the mac job signs + notarizes (minutes; Apple's
+   queue), the Windows job KeyLocker-signs (consumes **2 metered DigiCert
+   signatures**), the release job merges everything and publishes.
+4. Verify:
+   ```bash
+   gh release view vX.Y.Z --json assets --jq '.assets[].name'
+   # expect: Clarity.app.tar.gz, Clarity_X.Y.Z_aarch64.dmg,
+   #         Clarity_X.Y.Z_x64-setup.exe, latest.json
+   ```
+5. Edit the auto-generated release notes if desired.
+
+All signing credentials live in GitHub repo secrets (`APPLE_*`, `SM_*`,
+`TAURI_SIGNING_PRIVATE_KEY`); see `~/xeto-dev/app-release-strategy.md` for
+what each is and how to rotate them.
+
+---
+
+The rest of this document describes the **manual (local) macOS release
+process** — kept as the fallback if CI is unavailable, and as reference for
+how the pieces work. Every release must ship the updater bundle and the
+signed manifest or auto-update will break.
 
 ---
 

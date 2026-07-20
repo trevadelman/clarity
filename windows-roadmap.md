@@ -37,13 +37,11 @@ items below are everything that remains.
   (with user data removal), fresh reinstall — all working.
 - [x] NSIS installer icon was the stock NSIS one — fixed with
   `bundle.windows.nsis.installerIcon` in `tauri.conf.json`.
-- [ ] Full release workflow on version tag push (`v*`):
-  - **macOS job** (`macos-latest`): sign + notarize. Secrets needed:
-    `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
-    Developer ID cert as base64 `.p12` (+ import into runner keychain),
-    `TAURI_SIGNING_PRIVATE_KEY`.
-  - **Windows job** (`windows-latest`): `npm run tauri build` produces NSIS
-    `.exe` / `.msi` + updater artifact.
+- [x] Full release workflow on version tag push (`v*`):
+  `.github/workflows/release.yml` — parallel macOS (Developer ID import →
+  sign → notarize → verify) and Windows (KeyLocker, 2 signatures) jobs.
+  All `APPLE_*`, `SM_*`, and `TAURI_SIGNING_PRIVATE_KEY` secrets set.
+  ⚠️ Unverified until the first tag push (next release).
 
 ## Phase 3 — Windows code signing (DigiCert KeyLocker, EV) ✅
 
@@ -61,11 +59,14 @@ items below are everything that remains.
 
 ## Phase 4 — Release integration
 
-- [ ] Merge macOS + Windows entries into one `latest.json`; attach all
-  assets (DMG, `.app.tar.gz`, NSIS `.exe`, sigs, manifest) to the GitHub
-  release. Existing mac installs keep updating; Windows installs update via
-  `windows-x86_64`.
-- [ ] Update `docs/releasing.md` for the CI-based flow.
+- [x] Merge job in `release.yml` combines macOS + Windows artifacts into one
+  `latest.json` and attaches all assets (DMG, `.app.tar.gz`, NSIS `.exe`,
+  manifest) to the GitHub release. Existing mac installs keep updating;
+  Windows installs update via `windows-x86_64`.
+- [x] `docs/releasing.md` rewritten for the CI flow (manual macOS process
+  retained as fallback/reference).
+- [ ] First tag-push release (vNext) — verify both jobs end-to-end, both
+  platform updates apply, and DigiCert dashboard shows exactly +2.
 
 ## Phase 5 — Windows polish (post-first-ship)
 

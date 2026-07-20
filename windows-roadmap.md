@@ -29,15 +29,21 @@ items below are everything that remains.
 
 ## Phase 2 — Windows build in CI (GitHub Actions)
 
-- [ ] Workflow triggered on version tag push (`v*`):
+- [x] Manual test workflow `.github/workflows/windows-build.yml`
+  (`workflow_dispatch`, `windows-latest`, rust-cache, installers uploaded as
+  workflow artifacts only — invisible to the updater, no banner).
+- [x] Un-signed Windows build smoke-tested on an AWS Windows instance:
+  install, Loom + GitHub features, chat, restart persistence, uninstall
+  (with user data removal), fresh reinstall — all working.
+- [x] NSIS installer icon was the stock NSIS one — fixed with
+  `bundle.windows.nsis.installerIcon` in `tauri.conf.json`.
+- [ ] Full release workflow on version tag push (`v*`):
   - **macOS job** (`macos-latest`): sign + notarize. Secrets needed:
     `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`,
     Developer ID cert as base64 `.p12` (+ import into runner keychain),
     `TAURI_SIGNING_PRIVATE_KEY`.
   - **Windows job** (`windows-latest`): `npm run tauri build` produces NSIS
     `.exe` / `.msi` + updater artifact.
-- [ ] Un-signed Windows build first — verify the app actually runs
-  (smoke-test on an AWS Windows instance).
 
 ## Phase 3 — Windows code signing (DigiCert KeyLocker, EV)
 
@@ -62,8 +68,9 @@ items below are everything that remains.
 - [ ] Title bar: `titleBarStyle: Overlay` is macOS-only; Windows shows a
   native title bar over the transparent drag strip. Decide: accept native
   bar (fine) or use `decorations: false` + custom controls (later).
-- [ ] Verify drag-drop file paths, asset-protocol video playback (WebView2),
-  and store/media dirs on a real Windows machine.
+- [x] Verify drag-drop file paths, asset-protocol video playback (WebView2),
+  and store/media dirs on a real Windows machine — confirmed in the AWS
+  smoke test.
 - [ ] Consider `webview2` bootstrapper options in the NSIS installer
   (default "download bootstrapper" is fine for online users).
 

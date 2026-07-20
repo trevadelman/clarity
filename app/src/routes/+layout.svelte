@@ -16,7 +16,7 @@
 
   const links = [
     { href: "/", label: "Library", icon: Library },
-    { href: "/add", label: "Add video", icon: Plus },
+    { href: "/add", label: "Add source", icon: Plus },
     { href: "/settings", label: "Settings", icon: Settings },
   ];
 

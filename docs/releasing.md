@@ -8,7 +8,9 @@ KeyLocker EV) — plus the merged `latest.json` the auto-updater consumes.
 ## Per-release checklist (CI flow)
 
 1. Bump the version in `app/package.json` and
-   `app/src-tauri/tauri.conf.json` (must match), run `npm run check`,
+   `app/src-tauri/tauri.conf.json` (must match), rewrite
+   `docs/release-notes.md` for this version (CI uses it for both the
+   GitHub release body and the in-app "What's new"), run `npm run check`,
    commit and push.
 2. Tag and push:
    ```bash

@@ -120,8 +120,8 @@
 
 <header class="page-head">
   <div>
-    <h1>Add a video</h1>
-    <p class="sub">Bring a whiteboard session into your library.</p>
+    <h1>Add a source</h1>
+    <p class="sub">Bring a video, Loom, YouTube link, or GitHub repo into your library.</p>
   </div>
 </header>
 

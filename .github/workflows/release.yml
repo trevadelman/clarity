@@ -192,7 +192,7 @@ jobs:
           node app/scripts/make-latest-json.mjs \
             --bundle-dir "$PWD/bundle" \
             --out "$PWD/bundle/latest.json" \
-            --notes "Clarity ${GITHUB_REF_NAME}"
+            --notes "$(cat docs/release-notes.md)"
           cat bundle/latest.json
 
       - name: Create GitHub release
@@ -205,4 +205,4 @@ jobs:
             bundle/nsis/*.exe \
             bundle/latest.json \
             --title "Clarity $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes-file docs/release-notes.md

@@ -141,7 +141,7 @@
 
   async function handleClearAll() {
     const ok = await confirm(
-      "Delete ALL app data? This permanently removes every stored video, its summary, and its Gemini upload. This cannot be undone.",
+      "Delete ALL app data? This permanently removes every stored source, its summary, and its Gemini upload. This cannot be undone.",
       { title: "Delete all app data", kind: "warning" }
     );
     if (!ok) return;
@@ -198,9 +198,9 @@
 {:else if videos.length === 0}
   <div class="empty" in:fade>
     <span class="empty-icon"><Film size={42} /></span>
-    <h2>No videos yet</h2>
-    <p>Add a whiteboard session to get started.</p>
-    <a class="btn primary" href="/add"><Plus size={16} /> Add your first video</a>
+    <h2>Nothing here yet</h2>
+    <p>Add a video or GitHub repo to get started.</p>
+    <a class="btn primary" href="/add"><Plus size={16} /> Add your first source</a>
   </div>
 {:else}
   <div class="toolbar">
@@ -249,7 +249,7 @@
 
   {#if filtered.length === 0}
     <div class="empty small" in:fade>
-      <p>No videos match your filters.</p>
+      <p>No sources match your filters.</p>
       <button class="btn" onclick={clearFilters}>Clear filters</button>
     </div>
   {:else}
@@ -329,8 +329,8 @@
     onClear={handleClearLibraryChat}
     disabled={!apiKey || summarized.length === 0}
     emptyHint={summarized.length === 0
-      ? "Summarize at least one video to ask questions across your library."
-      : `Ask across all ${summarized.length} summarized video${summarized.length === 1 ? "" : "s"} — answers cite their sources.`}
+      ? "Summarize at least one source to ask questions across your library."
+      : `Ask across all ${summarized.length} summarized source${summarized.length === 1 ? "" : "s"} — answers cite their sources.`}
     videoNames={chatVideoNames}
   />
 

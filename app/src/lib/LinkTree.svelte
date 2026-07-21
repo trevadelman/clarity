@@ -34,6 +34,10 @@
   let renamingId = $state<string | null>(null);
   let renameValue = $state("");
 
+  // Two-step delete: first trash click arms (no undo!), second deletes.
+  let confirmDeleteId = $state<string | null>(null);
+  let confirmTimer: ReturnType<typeof setTimeout> | null = null;
+
   // Favicons that failed to load fall back to a generic icon.
   let brokenIcons = $state<Record<string, boolean>>({});
 
@@ -184,6 +188,12 @@
     addParentId = parentId;
     addLabel = "";
     addUrl = "";
+    // The form renders inside the folder, so it must be open to be seen.
+    if (parentId) expanded[parentId] = true;
+  }
+
+  function cancelAdd() {
+    addOpen = false;
   }
 
   async function submitAdd() {
@@ -217,6 +227,15 @@
   }
 
   async function remove(node: BookmarkNode) {
+    // No undo exists, so require a second click to confirm.
+    if (confirmDeleteId !== node.id) {
+      confirmDeleteId = node.id;
+      if (confirmTimer) clearTimeout(confirmTimer);
+      confirmTimer = setTimeout(() => (confirmDeleteId = null), 3000);
+      return;
+    }
+    if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
+    confirmDeleteId = null;
     await removeBookmark(node.id);
     if (selectedId === node.id) selectedId = null;
     await refresh();
@@ -284,6 +303,19 @@
         ondragover={onRootDragOver}
         ondrop={onRootDrop}
       ></div>
+      {#if addOpen && addParentId === null}
+        {@render addForm(0)}
+      {:else}
+        <!-- Ghost row: invisible until the tree is hovered (Arc-style). -->
+        <div class="ghost-row">
+          <button class="add-btn" onclick={() => openAdd("link", null)}>
+            <Plus size={13} /> Link
+          </button>
+          <button class="add-btn" onclick={() => openAdd("folder", null)}>
+            <Plus size={13} /> Folder
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 
@@ -348,7 +380,13 @@
             <FolderPlus size={12} />
           </button>
         {/if}
-        <button class="mini danger" onclick={() => remove(node)} title="Delete">
+        <button
+          class="mini danger"
+          class:armed={confirmDeleteId === node.id}
+          onclick={() => remove(node)}
+          title={confirmDeleteId === node.id ? "No undo — click again to delete" : "Delete"}
+        >
+          {#if confirmDeleteId === node.id}<span class="confirm-label">Sure?</span>{/if}
           <Trash2 size={12} />
         </button>
       </span>
@@ -357,36 +395,43 @@
       {#each childrenOf(node.id) as child (child.id)}
         {@render row(child, depth + 1)}
       {/each}
+      {#if addOpen && addParentId === node.id}
+        {@render addForm(depth + 1)}
+      {/if}
     {/if}
   {/snippet}
 
-  {#if collapsed}
-    <!-- Collapsed rail: favorites only; expand the sidebar to manage the tree. -->
-  {:else if addOpen}
-    <form class="add-form" onsubmit={(e) => { e.preventDefault(); submitAdd(); }}>
+  <!-- Inline add form, rendered exactly where the new node will appear. -->
+  {#snippet addForm(depth: number)}
+    <form
+      class="add-form"
+      style:margin-left={`${0.4 + depth * 0.85}rem`}
+      onsubmit={(e) => { e.preventDefault(); submitAdd(); }}
+    >
       {#if addKind === "link"}
         <!-- svelte-ignore a11y_autofocus -->
-        <input type="text" placeholder="URL (e.g. xeto.dev)" bind:value={addUrl} autofocus />
-        <input type="text" placeholder="Label (optional)" bind:value={addLabel} />
+        <input
+          type="text" placeholder="URL (e.g. xeto.dev)" bind:value={addUrl} autofocus
+          onkeydown={(e) => e.key === "Escape" && cancelAdd()}
+        />
+        <input
+          type="text" placeholder="Label (optional)" bind:value={addLabel}
+          onkeydown={(e) => e.key === "Escape" && cancelAdd()}
+        />
       {:else}
         <!-- svelte-ignore a11y_autofocus -->
-        <input type="text" placeholder="Folder name" bind:value={addLabel} autofocus />
+        <input
+          type="text" placeholder="Folder name" bind:value={addLabel} autofocus
+          onkeydown={(e) => e.key === "Escape" && cancelAdd()}
+        />
       {/if}
       <div class="add-actions">
         <button type="submit" class="add-save">Add</button>
-        <button type="button" class="add-cancel" onclick={() => (addOpen = false)}>Cancel</button>
+        <button type="button" class="add-cancel" onclick={cancelAdd}>Cancel</button>
       </div>
     </form>
-  {:else}
-    <div class="add-row">
-      <button class="add-btn" onclick={() => openAdd("link", null)}>
-        <Plus size={13} /> Link
-      </button>
-      <button class="add-btn" onclick={() => openAdd("folder", null)}>
-        <Plus size={13} /> Folder
-      </button>
-    </div>
-  {/if}
+  {/snippet}
+
 </div>
 
 <style>
@@ -432,6 +477,8 @@
     align-items: center;
     border-radius: var(--radius-sm);
     padding-right: 0.25rem;
+    /* Anchor for the armed delete chip, which overlays the other actions. */
+    position: relative;
   }
   .row:hover { background: var(--sidebar-hover); }
   .row.sel { background: rgba(109, 94, 252, 0.16); }
@@ -505,8 +552,34 @@
   }
   .mini:hover { opacity: 1; background: rgba(255, 255, 255, 0.1); }
   .mini.danger:hover { color: #f2555a; }
+  .mini.armed {
+    /* Overlay the row's action area instead of pushing siblings aside. */
+    position: absolute;
+    right: 0.25rem;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 1;
+    opacity: 1;
+    background: rgba(242, 85, 90, 0.95);
+    color: #fff;
+    gap: 0.2rem;
+    display: inline-flex;
+    align-items: center;
+    padding: 0.25rem 0.45rem;
+  }
+  .mini.armed:hover { background: #f2555a; color: #fff; }
+  .confirm-label { font-size: 0.68rem; font-weight: 600; }
 
-  .add-row { display: flex; gap: 0.35rem; }
+  /* Hidden until the tree is hovered — keeps the rail quiet (Arc-style). */
+  .ghost-row {
+    display: flex;
+    gap: 0.35rem;
+    padding-top: 0.3rem;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .tree:hover .ghost-row,
+  .ghost-row:focus-within { opacity: 1; }
   .add-btn {
     display: inline-flex;
     align-items: center;
@@ -522,7 +595,7 @@
   }
   .add-btn:hover { background: var(--sidebar-hover); color: var(--sidebar-text-bright); }
 
-  .add-form { display: flex; flex-direction: column; gap: 0.35rem; }
+  .add-form { display: flex; flex-direction: column; gap: 0.35rem; padding: 0.3rem 0.25rem 0.3rem 0; }
   .add-form input {
     border: 1px solid var(--sidebar-border);
     border-radius: var(--radius-sm);

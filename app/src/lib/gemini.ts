@@ -570,7 +570,11 @@ const REPO_CHAT_SYSTEM_PROMPT =
   "matters.\n\n" +
   "Reference files by path and commits by short sha in backticks. Answer in " +
   "concise Markdown. If something is not covered by the context and cannot be " +
-  "found with the tools, say so plainly.";
+  "found with the tools, say so plainly.\n\n" +
+  "CITATIONS: when your answer draws on a specific file, cite it with a marker " +
+  "in the exact form [FILE:path/from/repo/root] and when it draws on a specific " +
+  "commit use [COMMIT:sha]. Place markers inline where relevant so the app can " +
+  "render clickable links. Cite every file and commit you drew from.";
 
 const REPO_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   {
@@ -637,6 +641,13 @@ const REPO_TOOL_DECLARATIONS: FunctionDeclaration[] = [
 /** Executes one named repo tool call and returns a JSON-serializable result. */
 export type RepoToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
+/** Reports a tool call for UI purposes (label plus the raw call details). */
+export type RepoToolReporter = (
+  label: string,
+  name: string,
+  args: Record<string, unknown>
+) => void;
+
 /** Minimal digest info the repo chat needs for context. */
 export interface RepoChatDigest {
   label: string;
@@ -659,7 +670,7 @@ export async function generateRepoChatReply(
   repoContext: string,
   digests: RepoChatDigest[],
   execute: RepoToolExecutor,
-  onToolCall: (label: string) => void = () => {},
+  onToolCall: RepoToolReporter = () => {},
   maxToolTurns: number = DEFAULT_TOOL_TURNS,
   model: ModelId = DEFAULT_MODEL
 ): Promise<ChatReply> {
@@ -721,7 +732,7 @@ export async function generateRepoChatReply(
       const args = (call.args ?? {}) as Record<string, unknown>;
       const label = describeToolCall(name, args);
       toolCalls.push(label);
-      onToolCall(label);
+      onToolCall(label, name, args);
       let result: unknown;
       try {
         result = await execute(name, args);

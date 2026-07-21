@@ -10,7 +10,7 @@
   import {
     ArrowLeft, Trash2, Sparkles, RefreshCw, Copy, Download,
     Cloud, CloudOff, CircleCheck, Tag, X, Plus, Image as ImageIcon,
-    Film, Camera, Play, SlidersHorizontal, ChevronDown,
+    Film, Camera, Play, SlidersHorizontal, ChevronDown, Globe,
   } from "lucide-svelte";
 
   import {
@@ -34,6 +34,8 @@
   } from "$lib/videoLibrary";
   import ChatPanel from "$lib/ChatPanel.svelte";
   import RepoActivity from "$lib/RepoActivity.svelte";
+  import ResearchPanel from "$lib/ResearchPanel.svelte";
+  import { urlForToolCall, fileUrl, commitUrl, repoHomeUrl } from "$lib/researchView";
   import { captureFrame, sampleFrames } from "$lib/frames";
 
   import { mediaSrc, mediaAbsPath } from "$lib/media";
@@ -69,6 +71,16 @@
   let playerEl = $state<HTMLVideoElement | null>(null);
   let chatMessages = $state<ChatMessage[]>([]);
   let chatToolStatus = $state<string | null>(null);
+  let chatOpen = $state(false);
+  // Live research view: set to a GitHub URL to open/navigate the docked
+  // native webview; null closes it.
+  let researchUrl = $state<string | null>(null);
+
+  // Closing the chat also dismisses the research view — it exists to follow
+  // the conversation, so it shouldn't outlive it.
+  $effect(() => {
+    if (!chatOpen && researchUrl) researchUrl = null;
+  });
 
   // Resolved asset-protocol URLs for disk-backed media (paths are async).
   let diagramUrl = $state("");
@@ -405,11 +417,19 @@
       (info.language ? `Primary language: ${info.language}\n` : "") +
       `Default branch: ${info.defaultBranch}\n` +
       (info.pushedAt ? `Last push: ${info.pushedAt}\n` : "");
+    const ref: RepoRef = { owner: info.owner, repo: info.repo };
     try {
       const reply = await generateRepoChatReply(
         apiKey, question, chatMessages.slice(0, -1),
         repoContext, record!.repoDigests ?? [],
-        runRepoTool, (label) => (chatToolStatus = label), maxToolTurns
+        runRepoTool,
+        (label, name, args) => {
+          chatToolStatus = label;
+          // Follow the agent's research live in the docked GitHub view.
+          const url = urlForToolCall(name, args, ref, info.defaultBranch);
+          if (url) researchUrl = url;
+        },
+        maxToolTurns
       );
       return { text: reply.text, costUsd: reply.usage.costUsd, toolCalls: reply.toolCalls };
     } finally {
@@ -455,6 +475,27 @@
     }
   }
 
+  /** Open the research view at a cited file or commit. */
+  function handleCitation(kind: "file" | "commit", value: string) {
+    const info = record?.repoInfo;
+    if (!info) return;
+    const ref: RepoRef = { owner: info.owner, repo: info.repo };
+    researchUrl = kind === "file"
+      ? fileUrl(ref, info.defaultBranch, value)
+      : commitUrl(ref, value);
+  }
+
+  /** Manually open the research view (with the chat it accompanies). */
+  function openResearch() {
+    const info = record?.repoInfo;
+    if (!info) return;
+    chatOpen = true;
+    researchUrl = repoHomeUrl(
+      { owner: info.owner, repo: info.repo },
+      info.defaultBranch
+    );
+  }
+
   async function handleClearChat() {
     if (!record) return;
     chatMessages = [];
@@ -481,7 +522,12 @@
 {:else}
   <header class="page-head">
     <h1>{record.videoName}</h1>
-    <button class="btn danger" onclick={handleDelete}><Trash2 size={15} /> Delete</button>
+    <div class="head-actions">
+      {#if isRepo && !researchUrl}
+        <button class="btn" onclick={openResearch}><Globe size={15} /> Live view</button>
+      {/if}
+      <button class="btn danger" onclick={handleDelete}><Trash2 size={15} /> Delete</button>
+    </div>
   </header>
 
   {#if isRepo}
@@ -770,6 +816,15 @@
     </section>
   {/if}
 
+  {#if isRepo && researchUrl}
+    <!-- Fullscreen over the main content; shrinks right when the chat is open. -->
+    <ResearchPanel
+      url={researchUrl}
+      onClose={() => (researchUrl = null)}
+      rightOffset={chatOpen ? "min(420px, 92vw)" : "0px"}
+    />
+  {/if}
+
   <ChatPanel
     title={record.videoName}
     messages={chatMessages}
@@ -778,6 +833,9 @@
     onSeek={(sec) => seekPlayer(sec)}
     disabled={!apiKey}
     toolStatus={chatToolStatus}
+    showScrim={!(isRepo && researchUrl)}
+    onCitation={isRepo ? handleCitation : undefined}
+    bind:open={chatOpen}
     emptyHint={isRepo
       ? "Ask about this repo — I can read files, commits, and diffs on demand."
       : record.summary
@@ -824,6 +882,7 @@
   .small { font-size: 0.85rem; }
 
   .page-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+  .head-actions { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
   h1 { font-size: 1.3rem; margin: 0; word-break: break-word; letter-spacing: -0.01em; }
   h2 { font-size: 1.05rem; margin: 0; display: flex; align-items: center; gap: 0.4rem; }
   h2 :global(svg) { color: var(--accent); }

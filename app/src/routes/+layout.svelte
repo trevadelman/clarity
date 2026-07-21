@@ -98,7 +98,8 @@
 {/if}
 
 
-<div class="app">
+<!-- --sidebar-w lets fixed overlays (e.g. the research view) respect the nav rail. -->
+<div class="app" style:--sidebar-w={collapsed ? "64px" : "220px"}>
   <nav class="sidebar" class:collapsed>
     <a class="brand" href="/" title="Clarity — Library">
       <span class="logo"><Video size={18} /></span>

@@ -27,6 +27,12 @@
     videoNames?: Record<string, string> | null;
     /** Live research status line (e.g. "Reading src/lib/media.ts…"). */
     toolStatus?: string | null;
+    /** Hide the dimming scrim (e.g. while the research view is open). */
+    showScrim?: boolean;
+    /** Called when a [FILE:path] or [COMMIT:sha] citation chip is clicked. */
+    onCitation?: (kind: "file" | "commit", value: string) => void;
+    /** Whether the panel is expanded; bindable so parents can open it. */
+    open?: boolean;
   }
 
   let {
@@ -34,9 +40,10 @@
     emptyHint = "Ask anything about this video.",
     videoNames = null,
     toolStatus = null,
+    showScrim = true,
+    onCitation,
+    open = $bindable(false),
   }: Props = $props();
-
-  let open = $state(false);
   let question = $state("");
   let busy = $state(false);
   let scrollEl = $state<HTMLElement | null>(null);
@@ -58,6 +65,12 @@
     scrollEl?.scrollTo({ top: scrollEl.scrollHeight, behavior: "smooth" });
   }
 
+  // Whenever the panel opens (via the FAB or externally through bind:open),
+  // jump straight to where the conversation left off.
+  $effect(() => {
+    if (open && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+  });
+
   async function submit() {
     const q = question.trim();
     if (!q || busy || disabled) return;
@@ -71,13 +84,17 @@
     }
   }
 
-  async function togglePanel() {
+  function togglePanel() {
     open = !open;
-    if (open) await scrollToBottom();
   }
 
   const TS_RE = /\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g;
   const VIDEO_RE = /\[VIDEO:\s*([\w-]+)\s*(?:@\s*(\d{1,2}:\d{2}(?::\d{2})?))?\s*\]/g;
+  // Greedy (\S+) so paths containing brackets — e.g. SvelteKit's
+  // routes/video/[id]/+page.svelte — keep them; backtracking yields the
+  // final ] to close the citation.
+  const FILE_RE = /\[FILE:\s*(\S+)\s*\]/g;
+  const COMMIT_RE = /\[COMMIT:\s*([0-9a-f]{6,40})\s*\]/gi;
 
   /** Convert citation + timestamp markers into clickable chips, then markdown. */
   function renderMessage(text: string): string {
@@ -90,6 +107,12 @@
         return `<a class="vid-chip" href="/video/${vid}">${label}</a>`;
       });
     }
+    if (onCitation) {
+      out = out.replace(FILE_RE, (_m, path) =>
+        `<button class="cite-chip" data-cite-kind="file" data-cite-value="${path}">${path}</button>`);
+      out = out.replace(COMMIT_RE, (_m, sha) =>
+        `<button class="cite-chip" data-cite-kind="commit" data-cite-value="${sha}">${String(sha).slice(0, 7)}</button>`);
+    }
     const withChips = out.replace(TS_RE, (_m, a, b, c) => {
       const sec = c != null
         ? Number(a) * 3600 + Number(b) * 60 + Number(c)
@@ -101,7 +124,15 @@
   }
 
   function handleBodyClick(e: MouseEvent) {
-    const target = (e.target as HTMLElement).closest(".ts-chip");
+    const el = e.target as HTMLElement;
+    const cite = el.closest(".cite-chip");
+    if (cite) {
+      const kind = cite.getAttribute("data-cite-kind") as "file" | "commit";
+      const value = cite.getAttribute("data-cite-value") ?? "";
+      if (value) onCitation?.(kind, value);
+      return;
+    }
+    const target = el.closest(".ts-chip");
     if (!target) return;
     const sec = Number(target.getAttribute("data-sec"));
     if (!Number.isNaN(sec)) onSeek?.(sec);
@@ -117,7 +148,9 @@
 </button>
 
 {#if open}
-  <div class="scrim" transition:fade={{ duration: 120 }} onclick={togglePanel} aria-hidden="true"></div>
+  {#if showScrim}
+    <div class="scrim" transition:fade={{ duration: 120 }} onclick={togglePanel} aria-hidden="true"></div>
+  {/if}
   <aside class="panel" transition:fly={{ x: 420, duration: 200 }}>
     <header class="panel-head">
       <div class="head-text">
@@ -403,6 +436,25 @@
   }
   .markdown :global(.vid-chip:hover) {
     background: color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  .markdown :global(.cite-chip) {
+    display: inline-block;
+    border: none;
+    background: color-mix(in srgb, #a371f7 16%, transparent);
+    color: #a371f7;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 0.76em;
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    cursor: pointer;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    vertical-align: bottom;
+  }
+  .markdown :global(.cite-chip:hover) {
+    background: color-mix(in srgb, #a371f7 28%, transparent);
   }
 
   .composer {

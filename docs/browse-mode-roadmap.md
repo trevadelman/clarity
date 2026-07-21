@@ -195,10 +195,18 @@ Rust (lib.rs)
 
 ## Deferred / explicitly out of scope
 
+- ~~Tree drag-and-drop~~ ✅ DONE: rows are draggable with three drop zones
+  (before/into/after via cursor Y), spring-loaded folder expansion (500ms
+  hover), self/descendant-cycle guard, trailing root drop zone, and one
+  atomic `moveBookmark(id, parent, index)` store op that renumbers the
+  destination siblings. **Key spike finding:** HTML5 drop events never
+  reach the DOM in Tauri unless the window sets `dragDropEnabled: false` —
+  wry's native file-drop handling swallows dragover/drop at the webview
+  layer (cross-platform issue; nothing here used native file drop).
 - **Command-execution bookmarks** ("run terminal and build commands").
   Real security implications (sidebar click → arbitrary local process).
   Own feature (`kind: "command"` + shell plugin) if ever.
-- Tree polish: drag-and-drop, inline rename, spaces/workspaces.
+- Tree polish: spaces/workspaces (DnD and inline rename are done).
 - Webview session/login management beyond the persistent default profile.
   (Note: logins DO persist — tabs share WKWebView's default persistent
   data store, so sessions survive tab eviction and app restarts. Spike

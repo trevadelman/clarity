@@ -7,7 +7,7 @@
   } from "lucide-svelte";
   import {
     listBookmarks, addLink, addFolder, removeBookmark, updateBookmark,
-    normalizeUrl, faviconUrl, type BookmarkNode,
+    moveBookmark, normalizeUrl, faviconUrl, type BookmarkNode,
   } from "./bookmarks";
   import { selectedLink } from "./browseState";
   import { toast } from "./toast";
@@ -36,6 +36,131 @@
 
   // Favicons that failed to load fall back to a generic icon.
   let brokenIcons = $state<Record<string, boolean>>({});
+
+  // --- Drag & drop -------------------------------------------------------
+  // The dragged id lives here (dataTransfer is unreadable during dragover
+  // by spec). Drop target = row id + zone from the cursor's Y within it.
+  type DropZone = "before" | "into" | "after";
+  let dragId = $state<string | null>(null);
+  let dropTarget = $state<{ id: string | null; zone: DropZone } | null>(null);
+  // Spring-loaded folders: expand after hovering a collapsed folder.
+  let springTimer: ReturnType<typeof setTimeout> | null = null;
+  let springFor: string | null = null;
+
+  function nodeById(id: string): BookmarkNode | undefined {
+    return nodes.find((n) => n.id === id);
+  }
+
+  /** True if `id` is `maybeAncestor` or lives anywhere under it. */
+  function isWithin(id: string | null, maybeAncestor: string): boolean {
+    while (id) {
+      if (id === maybeAncestor) return true;
+      id = nodeById(id)?.parentId ?? null;
+    }
+    return false;
+  }
+
+  function onDragStart(e: DragEvent, node: BookmarkNode) {
+    // WebKit refuses to start a drag session without data set.
+    e.dataTransfer?.setData("text/plain", node.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+    dragId = node.id;
+  }
+
+  function zoneFor(e: DragEvent, node: BookmarkNode): DropZone {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const frac = (e.clientY - rect.top) / rect.height;
+    if (node.kind === "folder") {
+      return frac < 0.25 ? "before" : frac > 0.75 ? "after" : "into";
+    }
+    return frac < 0.5 ? "before" : "after";
+  }
+
+  function onRowDragOver(e: DragEvent, node: BookmarkNode) {
+    if (!dragId || dragId === node.id) return;
+    // A folder can't be dropped in or around its own subtree.
+    if (isWithin(node.id, dragId)) return;
+    // Required: without preventDefault the browser rejects the drop.
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const zone = zoneFor(e, node);
+    if (dropTarget?.id !== node.id || dropTarget?.zone !== zone) {
+      dropTarget = { id: node.id, zone };
+      armSpring(node, zone);
+    }
+  }
+
+  function armSpring(node: BookmarkNode, zone: DropZone) {
+    if (springTimer) { clearTimeout(springTimer); springTimer = null; }
+    springFor = null;
+    if (node.kind === "folder" && zone === "into" && !expanded[node.id]) {
+      springFor = node.id;
+      springTimer = setTimeout(() => {
+        if (springFor && dropTarget?.id === springFor && dropTarget.zone === "into") {
+          expanded[springFor] = true;
+        }
+      }, 500);
+    }
+  }
+
+  function clearDrag() {
+    dragId = null;
+    dropTarget = null;
+    if (springTimer) { clearTimeout(springTimer); springTimer = null; }
+    springFor = null;
+  }
+
+  /** Index of `node` among its siblings (sorted by order). */
+  function siblingIndex(node: BookmarkNode): number {
+    return childrenOf(node.parentId).findIndex((n) => n.id === node.id);
+  }
+
+  async function onRowDrop(e: DragEvent, node: BookmarkNode) {
+    e.preventDefault();
+    const id = dragId;
+    const target = dropTarget;
+    clearDrag();
+    if (!id || !target || target.id !== node.id) return;
+    try {
+      if (target.zone === "into") {
+        await moveBookmark(id, node.id, childrenOf(node.id).length);
+        expanded[node.id] = true;
+      } else {
+        const dragged = nodeById(id);
+        let index = siblingIndex(node) + (target.zone === "after" ? 1 : 0);
+        // Removing the dragged item from earlier in the same list shifts
+        // the insertion point left by one.
+        if (dragged?.parentId === node.parentId && siblingIndex(dragged) < siblingIndex(node)) {
+          index -= 1;
+        }
+        await moveBookmark(id, node.parentId, index);
+      }
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function onRootDragOver(e: DragEvent) {
+    if (!dragId) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    dropTarget = { id: null, zone: "into" };
+  }
+
+  async function onRootDrop(e: DragEvent) {
+    e.preventDefault();
+    const id = dragId;
+    clearDrag();
+    if (!id) return;
+    try {
+      await moveBookmark(id, null, childrenOf(null).length);
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+  // -----------------------------------------------------------------------
 
   const favorites = $derived(nodes.filter((n) => n.kind === "link" && n.favorite));
   // Collapsed rail: favorites if any are pinned, otherwise every link.
@@ -151,6 +276,14 @@
       {#each childrenOf(null) as node (node.id)}
         {@render row(node, 0)}
       {/each}
+      <!-- Trailing drop zone: move to top level (end). -->
+      <div
+        class="root-drop"
+        class:active={dragId !== null && dropTarget?.id === null}
+        role="presentation"
+        ondragover={onRootDragOver}
+        ondrop={onRootDrop}
+      ></div>
     </div>
   {/if}
 
@@ -158,7 +291,17 @@
     <div
       class="row"
       class:sel={selectedId === node.id}
+      class:dragging={dragId === node.id}
+      class:drop-into={dropTarget?.id === node.id && dropTarget.zone === "into"}
+      class:drop-before={dropTarget?.id === node.id && dropTarget.zone === "before"}
+      class:drop-after={dropTarget?.id === node.id && dropTarget.zone === "after"}
       style:padding-left={`${0.4 + depth * 0.85}rem`}
+      draggable="true"
+      role="presentation"
+      ondragstart={(e) => onDragStart(e, node)}
+      ondragover={(e) => onRowDragOver(e, node)}
+      ondrop={(e) => onRowDrop(e, node)}
+      ondragend={clearDrag}
     >
       <button
         class="row-main"
@@ -292,6 +435,16 @@
   }
   .row:hover { background: var(--sidebar-hover); }
   .row.sel { background: rgba(109, 94, 252, 0.16); }
+  .row.dragging { opacity: 0.4; }
+  .row.drop-into {
+    outline: 1.5px solid var(--accent);
+    outline-offset: -1.5px;
+    background: rgba(109, 94, 252, 0.12);
+  }
+  .row.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .row.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+  .root-drop { min-height: 14px; flex: 1; border-radius: var(--radius-sm); }
+  .root-drop.active { box-shadow: inset 0 2px 0 0 var(--accent); }
   .row.sel .row-main { color: var(--sidebar-text-bright); }
 
   .row-main {

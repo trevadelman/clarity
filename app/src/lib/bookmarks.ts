@@ -102,21 +102,54 @@ export async function updateBookmark(
   await writeAll(nodes);
 }
 
-/** Remove a node; folders cascade to all descendants. */
-export async function removeBookmark(id: string): Promise<void> {
-  const nodes = await readAll();
-  const doomed = new Set<string>([id]);
-  // Repeatedly sweep for children of doomed nodes until stable.
+/** Ids of `id` plus all its descendants (folders cascade). */
+function descendantSet(nodes: BookmarkNode[], id: string): Set<string> {
+  const set = new Set<string>([id]);
   let grew = true;
   while (grew) {
     grew = false;
     for (const n of nodes) {
-      if (n.parentId && doomed.has(n.parentId) && !doomed.has(n.id)) {
-        doomed.add(n.id);
+      if (n.parentId && set.has(n.parentId) && !set.has(n.id)) {
+        set.add(n.id);
         grew = true;
       }
     }
   }
+  return set;
+}
+
+/**
+ * Move a node to `newParentId` at sibling position `newIndex`, renumbering
+ * the destination siblings in one atomic write. Rejects moves that would
+ * place a folder inside itself or a descendant.
+ */
+export async function moveBookmark(
+  id: string,
+  newParentId: string | null,
+  newIndex: number
+): Promise<void> {
+  const nodes = await readAll();
+  const node = nodes.find((n) => n.id === id);
+  if (!node) return;
+  if (newParentId !== null && descendantSet(nodes, id).has(newParentId)) {
+    throw new Error("Can't move a folder into itself.");
+  }
+
+  const siblings = nodes
+    .filter((n) => n.parentId === newParentId && n.id !== id)
+    .sort((a, b) => a.order - b.order);
+  const at = Math.max(0, Math.min(newIndex, siblings.length));
+  siblings.splice(at, 0, node);
+
+  node.parentId = newParentId;
+  siblings.forEach((n, i) => (n.order = i));
+  await writeAll(nodes);
+}
+
+/** Remove a node; folders cascade to all descendants. */
+export async function removeBookmark(id: string): Promise<void> {
+  const nodes = await readAll();
+  const doomed = descendantSet(nodes, id);
   await writeAll(nodes.filter((n) => !doomed.has(n.id)));
 }
 

@@ -80,6 +80,14 @@
     if (active) threads[active.id] = [];
   }
 
+  /** Current theme's surface color (#rrggbb) for the webview's pre-paint bg. */
+  function themeBg(): string | undefined {
+    const v = getComputedStyle(document.documentElement)
+      .getPropertyValue("--surface")
+      .trim();
+    return /^#[0-9a-fA-F]{6}$/.test(v) ? v : undefined;
+  }
+
   function currentRect(): Rect | null {
     if (!placeholderEl) return null;
     const r = placeholderEl.getBoundingClientRect();
@@ -106,7 +114,7 @@
       const rect = currentRect();
       if (!rect || rect.width === 0) return;
       try {
-        await openTab(link.id, link.url!, rect);
+        await openTab(link.id, link.url!, rect, themeBg());
         active = link;
       } catch (err) {
         toast.error(err instanceof Error ? err.message : String(err));
@@ -169,6 +177,7 @@
         <strong>{active.label}</strong>
         <span class="crumb" title={active.url}>{active.url}</span>
       </div>
+      <span class="head-spacer"></span>
       <button class="chat-btn" class:on={chatOpen} onclick={() => (chatOpen = !chatOpen)} title="Ask AI about this page">
         <MessageCircle size={14} /> Ask AI
       </button>
@@ -192,6 +201,10 @@
         <h2>Nothing open</h2>
         <p>Pick a link from the sidebar tree, or add one to get started.</p>
       </div>
+    {:else}
+      <!-- Sits under the native webview; visible only until first paint,
+           so opening a tab shows themed bg + spinner, not a white flash. -->
+      <div class="loading"><span class="spinner"></span></div>
     {/if}
   </div>
 </div>
@@ -233,9 +246,8 @@
     gap: 0.55rem;
     /* Fixed height shared with ChatPanel's header so the two align. */
     height: var(--panel-head-h, 52px);
-    padding: 0 1rem;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
+    padding: 0 0.8rem;
+    background: var(--bg);
     flex-shrink: 0;
   }
   .nav-btns { display: inline-flex; gap: 0.25rem; }
@@ -262,11 +274,13 @@
     color: var(--accent);
   }
   .icon-btn {
+    /* Ghost buttons: no border at rest, subtle pill on hover (softer than
+       the boxed look). */
     display: grid;
     place-items: center;
     width: 30px;
     height: 30px;
-    border: 1px solid var(--border);
+    border: none;
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-dim);
@@ -278,13 +292,16 @@
   .ico { width: 16px; height: 16px; border-radius: 4px; flex-shrink: 0; }
   .glyph { display: inline-flex; color: var(--accent); flex-shrink: 0; }
   .head-text {
-    flex: 1;
+    /* One compact line: label, then dimmed URL beside it. */
     min-width: 0;
     display: flex;
-    flex-direction: column;
-    line-height: 1.25;
+    align-items: baseline;
+    gap: 0.5rem;
     font-size: 0.85rem;
+    overflow: hidden;
   }
+  .head-text strong { white-space: nowrap; }
+  .head-spacer { flex: 1; }
   .crumb {
     min-width: 0;
     font-size: 0.74rem;
@@ -296,10 +313,21 @@
   }
   .placeholder {
     flex: 1;
-    background: var(--bg);
+    min-height: 0;
+    background: var(--surface);
     display: grid;
     place-items: center;
   }
+  .loading { display: grid; place-items: center; }
+  .spinner {
+    width: 26px;
+    height: 26px;
+    border: 3px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   .empty { text-align: center; color: var(--text-dim); }
   .empty-icon { color: var(--accent); display: inline-flex; }
   .empty h2 { margin: 0.7rem 0 0.2rem; color: var(--text); font-size: 1.1rem; }

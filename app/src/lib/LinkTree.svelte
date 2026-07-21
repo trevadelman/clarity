@@ -19,9 +19,27 @@
 
   let { collapsed = false }: Props = $props();
 
+  const EXPANDED_KEY = "treeExpanded";
+
+  function loadExpanded(): Record<string, boolean> {
+    if (typeof localStorage === "undefined") return {};
+    try {
+      return JSON.parse(localStorage.getItem(EXPANDED_KEY) ?? "{}");
+    } catch {
+      return {};
+    }
+  }
+
   let nodes = $state<BookmarkNode[]>([]);
-  let expanded = $state<Record<string, boolean>>({});
-  let selectedId = $state<string | null>(null);
+  let expanded = $state<Record<string, boolean>>(loadExpanded());
+  // Selection lives in the shared store so it survives remounts (mode
+  // switches, sidebar collapse) while a tab is open in /browse.
+  const selectedId = $derived($selectedLink?.id ?? null);
+
+  // Persist folder expansion across mounts and app restarts.
+  $effect(() => {
+    localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
+  });
 
   // Add form state: which parent it targets (null = top level) and kind.
   let addOpen = $state(false);
@@ -237,7 +255,7 @@
     if (confirmTimer) { clearTimeout(confirmTimer); confirmTimer = null; }
     confirmDeleteId = null;
     await removeBookmark(node.id);
-    if (selectedId === node.id) selectedId = null;
+    if (selectedId === node.id) selectedLink.set(null);
     await refresh();
   }
 
@@ -264,7 +282,6 @@
       expanded[node.id] = !expanded[node.id];
       return;
     }
-    selectedId = node.id;
     selectedLink.set(node);
     goto("/browse");
   }
@@ -292,6 +309,9 @@
 
   {#if !collapsed}
     <div class="rows">
+      {#if nodes.length === 0 && !addOpen}
+        <p class="empty-hint">No links yet — add one below.</p>
+      {/if}
       {#each childrenOf(null) as node (node.id)}
         {@render row(node, 0)}
       {/each}
@@ -306,8 +326,9 @@
       {#if addOpen && addParentId === null}
         {@render addForm(0)}
       {:else}
-        <!-- Ghost row: invisible until the tree is hovered (Arc-style). -->
-        <div class="ghost-row">
+        <!-- Ghost row: invisible until the tree is hovered (Arc-style),
+             but always shown while the tree is empty. -->
+        <div class="ghost-row" class:always={nodes.length === 0}>
           <button class="add-btn" onclick={() => openAdd("link", null)}>
             <Plus size={13} /> Link
           </button>
@@ -579,7 +600,14 @@
     transition: opacity 0.15s;
   }
   .tree:hover .ghost-row,
+  .ghost-row.always,
   .ghost-row:focus-within { opacity: 1; }
+  .empty-hint {
+    margin: 0.2rem 0 0.4rem;
+    font-size: 0.8rem;
+    color: var(--sidebar-text-dim, var(--sidebar-text));
+    opacity: 0.7;
+  }
   .add-btn {
     display: inline-flex;
     align-items: center;

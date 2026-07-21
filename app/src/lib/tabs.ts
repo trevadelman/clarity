@@ -8,9 +8,18 @@ import type { Rect } from "./researchView";
  * instead of navigating a shared one. Rust enforces an LRU cap.
  */
 
-/** Open a tab (create-or-show) at the given CSS-pixel rect. */
-export async function openTab(id: string, url: string, rect: Rect): Promise<void> {
-  await invoke("open_tab", { id, url, ...rect });
+/**
+ * Open a tab (create-or-show) at the given CSS-pixel rect. `bg` is a
+ * `#rrggbb` theme color painted before the page's first render (avoids
+ * the white flash in dark mode).
+ */
+export async function openTab(
+  id: string,
+  url: string,
+  rect: Rect,
+  bg?: string
+): Promise<void> {
+  await invoke("open_tab", { id, url, ...rect, bg });
 }
 
 /** Reposition/resize all tab webviews (CSS pixels). */

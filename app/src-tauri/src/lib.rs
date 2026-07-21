@@ -34,6 +34,19 @@ fn tab_label(id: &str) -> String {
     format!("tab-{id}")
 }
 
+/// Parse a `#rrggbb` hex color (as sent by the frontend theme) into a
+/// webview background color.
+fn parse_hex_color(hex: &str) -> Option<tauri::webview::Color> {
+    let hex = hex.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(tauri::webview::Color(r, g, b, 255))
+}
+
 /// Create a child webview with the browser UA reliably applied to its very
 /// first real request. Builder options alone race the initial navigation on
 /// macOS (the first request leaves with the default UA; see Gmail's
@@ -47,10 +60,16 @@ fn add_browser_webview(
     y: f64,
     width: f64,
     height: f64,
+    bg: Option<&str>,
 ) -> Result<(), String> {
     let blank: tauri::Url = "about:blank".parse().unwrap();
-    let builder =
+    let mut builder =
         WebviewBuilder::new(label, WebviewUrl::External(blank)).user_agent(BROWSER_UA);
+    // Themed background: avoids the white flash before a page's first paint
+    // (worst in dark mode).
+    if let Some(color) = bg.and_then(parse_hex_color) {
+        builder = builder.background_color(color);
+    }
     let webview = window
         .add_child(
             builder,
@@ -118,7 +137,7 @@ fn open_research_view(
         return Ok(());
     }
 
-    add_browser_webview(&window, RESEARCH_LABEL, parsed, x, y, width, height)
+    add_browser_webview(&window, RESEARCH_LABEL, parsed, x, y, width, height, None)
 }
 
 /// Navigate the existing research webview to a new GitHub URL.
@@ -200,6 +219,7 @@ fn open_tab(
     y: f64,
     width: f64,
     height: f64,
+    bg: Option<String>,
 ) -> Result<(), String> {
     let parsed = parse_http_url(&url)?;
     let label = tab_label(&id);
@@ -224,7 +244,7 @@ fn open_tab(
         return Ok(());
     }
 
-    add_browser_webview(&window, &label, parsed, x, y, width, height)
+    add_browser_webview(&window, &label, parsed, x, y, width, height, bg.as_deref())
 }
 
 /// Reposition/resize the visible tab webviews (logical pixels).

@@ -208,13 +208,15 @@
     --radius: 12px;
     --radius-sm: 8px;
     --font: "Inter", -apple-system, system-ui, sans-serif;
-    /* The sidebar rail is always dark, regardless of theme. */
+    /* Sidebar rail defaults (dark) for the instant before initTheme(). */
     --sidebar-bg: #131318;
     --sidebar-text: #b3b3c0;
     --sidebar-text-dim: #b9b9c6;
     --sidebar-text-bright: #ffffff;
     --sidebar-hover: rgba(255, 255, 255, 0.06);
+    --sidebar-active: rgba(255, 255, 255, 0.1);
     --sidebar-border: rgba(255, 255, 255, 0.08);
+    --sidebar-edge: rgba(255, 255, 255, 0.05);
   }
   :global(html[data-theme="light"]) {
     --accent: #6d5efc;
@@ -231,6 +233,15 @@
     --hover: #f0f0f3;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
     --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.12);
+    /* Light rail: slightly darker than --bg so it still reads as chrome. */
+    --sidebar-bg: #eaeaef;
+    --sidebar-text: #4a4a56;
+    --sidebar-text-dim: #6a6a76;
+    --sidebar-text-bright: #1a1a1f;
+    --sidebar-hover: rgba(0, 0, 0, 0.05);
+    --sidebar-active: rgba(0, 0, 0, 0.08);
+    --sidebar-border: rgba(0, 0, 0, 0.1);
+    --sidebar-edge: rgba(0, 0, 0, 0.07);
   }
   :global(html[data-theme="dark"]) {
     /* Lighter accent in dark mode: #6d5efc as text on dark surfaces falls
@@ -250,6 +261,14 @@
     --hover: #22222c;
     --shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
     --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.55);
+    --sidebar-bg: #131318;
+    --sidebar-text: #b3b3c0;
+    --sidebar-text-dim: #b9b9c6;
+    --sidebar-text-bright: #ffffff;
+    --sidebar-hover: rgba(255, 255, 255, 0.06);
+    --sidebar-active: rgba(255, 255, 255, 0.1);
+    --sidebar-border: rgba(255, 255, 255, 0.08);
+    --sidebar-edge: rgba(255, 255, 255, 0.05);
   }
   :global(body) {
     margin: 0;
@@ -278,7 +297,7 @@
     height: var(--titlebar-h);
     z-index: 900;
     background: var(--sidebar-bg);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--sidebar-edge);
     -webkit-app-region: drag;
     app-region: drag;
   }
@@ -381,7 +400,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    border-right: 1px solid rgba(255, 255, 255, 0.05);
+    border-right: 1px solid var(--sidebar-edge);
     /* Pin the nav so it stays put while the page content scrolls. */
     position: sticky;
     top: var(--titlebar-h);

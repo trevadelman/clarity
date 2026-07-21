@@ -487,7 +487,7 @@
     padding: 0;
     transition: background 0.15s, border-color 0.15s;
   }
-  .fav:hover { background: rgba(255, 255, 255, 0.12); }
+  .fav:hover { background: var(--sidebar-active); }
   .fav.sel { border-color: var(--accent); }
   .fav img { width: 18px; height: 18px; border-radius: 4px; }
 
@@ -545,7 +545,7 @@
     min-width: 0;
     border: 1px solid var(--accent);
     border-radius: 5px;
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--sidebar-active);
     color: var(--sidebar-text-bright);
     font-size: 0.82rem;
     font-family: inherit;
@@ -571,7 +571,7 @@
     border-radius: 5px;
     opacity: 0.75;
   }
-  .mini:hover { opacity: 1; background: rgba(255, 255, 255, 0.1); }
+  .mini:hover { opacity: 1; background: var(--sidebar-active); }
   .mini.danger:hover { color: #f2555a; }
   .mini.armed {
     /* Overlay the row's action area instead of pushing siblings aside. */
@@ -627,7 +627,7 @@
   .add-form input {
     border: 1px solid var(--sidebar-border);
     border-radius: var(--radius-sm);
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--sidebar-hover);
     color: var(--sidebar-text-bright);
     font-size: 0.82rem;
     font-family: inherit;

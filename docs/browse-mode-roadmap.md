@@ -206,7 +206,12 @@ Rust (lib.rs)
   (Gmail showed "browser version no longer supported"), so tab/research
   webviews now send a real browser UA — Safari on macOS, Edge/Chrome on
   Windows (WebView2 is Chromium) — via a platform-conditional
-  `BROWSER_UA`. Bump versions occasionally.)
+  `BROWSER_UA`. Bump versions occasionally. Follow-ups: builder UA races
+  the initial navigation on macOS, so webviews are created at about:blank,
+  UA set natively, then navigated — first request carries the right UA.
+  And since SPAs cache their degraded shell in service workers, the tab
+  reload button is always a hard reload: unregister SWs + clear Cache API
+  + reload; cookies/logins untouched.)
 
 ## Risks / open questions
 

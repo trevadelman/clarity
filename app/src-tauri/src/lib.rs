@@ -34,6 +34,44 @@ fn tab_label(id: &str) -> String {
     format!("tab-{id}")
 }
 
+/// Create a child webview with the browser UA reliably applied to its very
+/// first real request. Builder options alone race the initial navigation on
+/// macOS (the first request leaves with the default UA; see Gmail's
+/// "unsupported browser" banner), so: create at about:blank, set
+/// `customUserAgent` natively, then navigate explicitly.
+fn add_browser_webview(
+    window: &Window,
+    label: &str,
+    url: tauri::Url,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let blank: tauri::Url = "about:blank".parse().unwrap();
+    let builder =
+        WebviewBuilder::new(label, WebviewUrl::External(blank)).user_agent(BROWSER_UA);
+    let webview = window
+        .add_child(
+            builder,
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width, height),
+        )
+        .map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    webview
+        .with_webview(|platform| {
+            use objc2_foundation::NSString;
+            use objc2_web_kit::WKWebView;
+            let wk: &WKWebView = unsafe { &*platform.inner().cast() };
+            unsafe { wk.setCustomUserAgent(Some(&NSString::from_str(BROWSER_UA))) };
+        })
+        .map_err(|e| e.to_string())?;
+
+    webview.navigate(url).map_err(|e| e.to_string())
+}
+
 /// Browse tabs may load any http(s) page; everything else is rejected
 /// (file:, data:, javascript:, ...).
 fn parse_http_url(url: &str) -> Result<tauri::Url, String> {
@@ -80,16 +118,7 @@ fn open_research_view(
         return Ok(());
     }
 
-    let builder = WebviewBuilder::new(RESEARCH_LABEL, WebviewUrl::External(parsed))
-        .user_agent(BROWSER_UA);
-    window
-        .add_child(
-            builder,
-            LogicalPosition::new(x, y),
-            LogicalSize::new(width, height),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    add_browser_webview(&window, RESEARCH_LABEL, parsed, x, y, width, height)
 }
 
 /// Navigate the existing research webview to a new GitHub URL.
@@ -195,16 +224,7 @@ fn open_tab(
         return Ok(());
     }
 
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
-        .user_agent(BROWSER_UA);
-    window
-        .add_child(
-            builder,
-            LogicalPosition::new(x, y),
-            LogicalSize::new(width, height),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    add_browser_webview(&window, &label, parsed, x, y, width, height)
 }
 
 /// Reposition/resize the visible tab webviews (logical pixels).
@@ -259,6 +279,20 @@ fn close_all_tabs(window: Window, state: State<TabState>) -> Result<(), String> 
     Ok(())
 }
 
+/// Reload is always a "hard" reload: stale service workers / Cache API
+/// entries are the classic way SPAs (Gmail) keep serving a degraded shell
+/// cached under an old user agent, so purge both before reloading. Cookies
+/// and logins are untouched. Falls back to a plain reload on any error.
+const HARD_RELOAD_JS: &str = r#"(async () => {
+  try {
+    const regs = await navigator.serviceWorker?.getRegistrations?.() ?? [];
+    await Promise.all(regs.map((r) => r.unregister()));
+    const keys = await caches?.keys?.() ?? [];
+    await Promise.all(keys.map((k) => caches.delete(k)));
+  } catch {}
+  location.reload();
+})()"#;
+
 /// Run history navigation (back/forward) or reload in a tab webview.
 #[tauri::command]
 fn tab_history(window: Window, id: String, action: String) -> Result<(), String> {
@@ -268,7 +302,7 @@ fn tab_history(window: Window, id: String, action: String) -> Result<(), String>
     let js = match action.as_str() {
         "back" => "history.back()",
         "forward" => "history.forward()",
-        "reload" => "location.reload()",
+        "reload" => HARD_RELOAD_JS,
         _ => return Err(format!("Unknown history action: {action}")),
     };
     webview.eval(js).map_err(|e| e.to_string())

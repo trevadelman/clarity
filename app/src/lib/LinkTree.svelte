@@ -3,6 +3,7 @@
   import { goto } from "$app/navigation";
   import {
     Folder, FolderOpen, ChevronRight, Plus, Trash2, Star, Globe, Link as LinkIcon,
+    FolderPlus,
   } from "lucide-svelte";
   import {
     listBookmarks, addLink, addFolder, removeBookmark, updateBookmark,
@@ -21,6 +22,13 @@
   let addParentId = $state<string | null>(null);
   let addLabel = $state("");
   let addUrl = $state("");
+
+  // Inline rename state.
+  let renamingId = $state<string | null>(null);
+  let renameValue = $state("");
+
+  // Favicons that failed to load fall back to a generic icon.
+  let brokenIcons = $state<Record<string, boolean>>({});
 
   const favorites = $derived(nodes.filter((n) => n.kind === "link" && n.favorite));
 
@@ -83,6 +91,19 @@
     await refresh();
   }
 
+  function startRename(node: BookmarkNode) {
+    renamingId = node.id;
+    renameValue = node.label;
+  }
+
+  async function commitRename() {
+    if (renamingId && renameValue.trim()) {
+      await updateBookmark(renamingId, { label: renameValue.trim() });
+      await refresh();
+    }
+    renamingId = null;
+  }
+
   function select(node: BookmarkNode) {
     if (node.kind === "folder") {
       expanded[node.id] = !expanded[node.id];
@@ -104,8 +125,8 @@
           onclick={() => select(f)}
           title={f.label}
         >
-          {#if f.url}
-            <img src={faviconUrl(f.url)} alt="" />
+          {#if f.url && !brokenIcons[f.id]}
+            <img src={faviconUrl(f.url)} alt="" onerror={() => (brokenIcons[f.id] = true)} />
           {:else}
             <Globe size={16} />
           {/if}
@@ -126,16 +147,37 @@
       class:sel={selectedId === node.id}
       style:padding-left={`${0.4 + depth * 0.85}rem`}
     >
-      <button class="row-main" onclick={() => select(node)} title={node.kind === "link" ? node.url : node.label}>
+      <button
+        class="row-main"
+        onclick={() => select(node)}
+        ondblclick={() => startRename(node)}
+        title={node.kind === "link" ? node.url : node.label}
+      >
         {#if node.kind === "folder"}
           <span class="chev" class:open={expanded[node.id]}><ChevronRight size={12} /></span>
           {#if expanded[node.id]}<FolderOpen size={14} />{:else}<Folder size={14} />{/if}
-        {:else if node.url}
-          <img class="ico" src={faviconUrl(node.url)} alt="" />
-        {:else}
+        {:else if node.url && !brokenIcons[node.id]}
+          <img class="ico" src={faviconUrl(node.url)} alt="" onerror={() => (brokenIcons[node.id] = true)} />
+        {:else if node.kind === "link"}
           <LinkIcon size={13} />
         {/if}
-        <span class="label">{node.label}</span>
+        {#if renamingId === node.id}
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            class="rename"
+            type="text"
+            bind:value={renameValue}
+            autofocus
+            onblur={commitRename}
+            onkeydown={(e) => {
+              if (e.key === "Enter") commitRename();
+              if (e.key === "Escape") renamingId = null;
+            }}
+            onclick={(e) => e.stopPropagation()}
+          />
+        {:else}
+          <span class="label">{node.label}</span>
+        {/if}
       </button>
       <span class="row-actions">
         {#if node.kind === "link"}
@@ -145,6 +187,9 @@
         {:else}
           <button class="mini" onclick={() => openAdd("link", node.id)} title="Add link inside">
             <Plus size={12} />
+          </button>
+          <button class="mini" onclick={() => openAdd("folder", node.id)} title="Add folder inside">
+            <FolderPlus size={12} />
           </button>
         {/if}
         <button class="mini danger" onclick={() => remove(node)} title="Delete">
@@ -252,6 +297,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .rename {
+    flex: 1;
+    min-width: 0;
+    border: 1px solid var(--accent);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--sidebar-text-bright);
+    font-size: 0.82rem;
+    font-family: inherit;
+    padding: 0.15rem 0.35rem;
+    outline: none;
   }
 
   .row-actions {

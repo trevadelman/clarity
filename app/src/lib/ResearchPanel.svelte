@@ -138,7 +138,8 @@
     align-items: center;
     gap: 0.5rem;
     /* Match the chat panel's header padding so the two align. */
-    padding: 2.6rem 1rem 0.8rem;
+    /* Top padding just clears the 32px titlebar drag strip. */
+    padding: 1.7rem 1rem 0.7rem;
     border-bottom: 1px solid var(--border);
   }
   .glyph { display: inline-flex; color: var(--accent); flex-shrink: 0; }

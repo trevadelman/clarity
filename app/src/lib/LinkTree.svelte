@@ -12,6 +12,13 @@
   import { selectedLink } from "./browseState";
   import { toast } from "./toast";
 
+  interface Props {
+    /** Collapsed rail: show only a vertical column of favorite favicons. */
+    collapsed?: boolean;
+  }
+
+  let { collapsed = false }: Props = $props();
+
   let nodes = $state<BookmarkNode[]>([]);
   let expanded = $state<Record<string, boolean>>({});
   let selectedId = $state<string | null>(null);
@@ -31,6 +38,10 @@
   let brokenIcons = $state<Record<string, boolean>>({});
 
   const favorites = $derived(nodes.filter((n) => n.kind === "link" && n.favorite));
+  // Collapsed rail: favorites if any are pinned, otherwise every link.
+  const railLinks = $derived(
+    favorites.length > 0 ? favorites : nodes.filter((n) => n.kind === "link")
+  );
 
   function childrenOf(parentId: string | null): BookmarkNode[] {
     return nodes.filter((n) => n.parentId === parentId);
@@ -115,10 +126,10 @@
   }
 </script>
 
-<div class="tree">
-  {#if favorites.length > 0}
-    <div class="fav-row">
-      {#each favorites as f (f.id)}
+<div class="tree" class:collapsed>
+  {#if collapsed ? railLinks.length > 0 : favorites.length > 0}
+    <div class="fav-row" class:fav-col={collapsed}>
+      {#each collapsed ? railLinks : favorites as f (f.id)}
         <button
           class="fav"
           class:sel={selectedId === f.id}
@@ -135,11 +146,13 @@
     </div>
   {/if}
 
-  <div class="rows">
-    {#each childrenOf(null) as node (node.id)}
-      {@render row(node, 0)}
-    {/each}
-  </div>
+  {#if !collapsed}
+    <div class="rows">
+      {#each childrenOf(null) as node (node.id)}
+        {@render row(node, 0)}
+      {/each}
+    </div>
+  {/if}
 
   {#snippet row(node: BookmarkNode, depth: number)}
     <div
@@ -204,7 +217,9 @@
     {/if}
   {/snippet}
 
-  {#if addOpen}
+  {#if collapsed}
+    <!-- Collapsed rail: favorites only; expand the sidebar to manage the tree. -->
+  {:else if addOpen}
     <form class="add-form" onsubmit={(e) => { e.preventDefault(); submitAdd(); }}>
       {#if addKind === "link"}
         <!-- svelte-ignore a11y_autofocus -->
@@ -246,6 +261,11 @@
     grid-template-columns: repeat(auto-fill, minmax(38px, 1fr));
     gap: 0.35rem;
   }
+  .fav-row.fav-col {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+  .fav-row.fav-col .fav { width: 38px; }
   .fav {
     display: grid;
     place-items: center;
@@ -275,24 +295,25 @@
   .row.sel .row-main { color: var(--sidebar-text-bright); }
 
   .row-main {
+    /* Sized to match the library-mode nav links for visual consistency. */
     flex: 1;
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 0.45rem;
+    gap: 0.6rem;
     border: none;
     background: transparent;
     color: var(--sidebar-text);
-    font-size: 0.85rem;
+    font-size: 0.92rem;
     font-family: inherit;
     cursor: pointer;
-    padding: 0.4rem 0.2rem;
+    padding: 0.55rem 0.3rem;
     text-align: left;
   }
   .row-main:hover { color: var(--sidebar-text-bright); }
   .chev { display: inline-flex; transition: transform 0.12s; flex-shrink: 0; }
   .chev.open { transform: rotate(90deg); }
-  .ico { width: 15px; height: 15px; border-radius: 3px; flex-shrink: 0; }
+  .ico { width: 17px; height: 17px; border-radius: 3px; flex-shrink: 0; }
   .label {
     overflow: hidden;
     text-overflow: ellipsis;

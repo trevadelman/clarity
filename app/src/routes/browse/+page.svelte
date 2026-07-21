@@ -142,7 +142,8 @@
     display: flex;
     align-items: center;
     gap: 0.55rem;
-    padding: 2.4rem 1rem 0.65rem;
+    /* Top padding just clears the 32px titlebar drag strip. */
+    padding: 1.7rem 1rem 0.65rem;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
   }

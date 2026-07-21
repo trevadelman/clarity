@@ -143,7 +143,7 @@
       </button>
     </div>
 
-    {#if mode === "library" || collapsed}
+    {#if mode === "library"}
       <div class="links">
         {#each links as l (l.href)}
           {@const Icon = l.icon}
@@ -158,7 +158,7 @@
         {/each}
       </div>
     {:else}
-      <LinkTree />
+      <LinkTree {collapsed} />
     {/if}
 
     <div class="bottom-row">

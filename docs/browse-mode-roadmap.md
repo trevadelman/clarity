@@ -178,8 +178,13 @@ Rust (lib.rs)
   longer carry per-surface "clear the titlebar" padding hacks.
 - Header alignment: browse chrome, ChatPanel, and ResearchPanel headers
   share a fixed `--panel-head-h` (52px) so they align by construction.
-- Windows note: the titlebar strip and all layout work is cross-platform
-  CSS; verify `decorations: false` behavior on a Windows build.
+- Traffic lights vertically centered in the strip via
+  `trafficLightPosition` (13,17 for the 38px bar — dialed in visually;
+  macOS anchors the inset in AppKit's coordinate space, not our CSS
+  strip); double-click-to-zoom works natively with the Overlay style.
+- Windows note: `titleBarStyle: "Overlay"` is macOS-only — Windows will
+  show its native titlebar above our strip. Eventual fix:
+  `decorations: false` + custom min/max/close buttons in the strip.
 
 ### Phase 4 — Conveniences (only after 1–3 prove out)
 10. "Pin current page" (requires current-URL tracking via navigation

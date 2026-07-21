@@ -216,8 +216,8 @@
 <style>
   .surface {
     /* Fill the content area edge-to-edge (the layout adds padding we undo). */
-    margin: -2.75rem -2.25rem -2rem;
-    height: 100vh;
+    margin: -1.5rem -2.25rem -2rem;
+    height: calc(100vh - var(--titlebar-h, 0px));
     display: flex;
     flex-direction: column;
     transition: margin-right 0.2s ease;
@@ -231,10 +231,12 @@
     display: flex;
     align-items: center;
     gap: 0.55rem;
-    /* Top padding just clears the 32px titlebar drag strip. */
-    padding: 1.7rem 1rem 0.65rem;
+    /* Fixed height shared with ChatPanel's header so the two align. */
+    height: var(--panel-head-h, 52px);
+    padding: 0 1rem;
     border-bottom: 1px solid var(--border);
     background: var(--surface);
+    flex-shrink: 0;
   }
   .nav-btns { display: inline-flex; gap: 0.25rem; }
   .chat-wrap :global(.fab) { display: none; }

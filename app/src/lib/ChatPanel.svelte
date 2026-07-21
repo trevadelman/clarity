@@ -261,7 +261,7 @@
 
   .panel {
     position: fixed;
-    top: 0;
+    top: var(--titlebar-h, 0px);
     right: 0;
     bottom: 0;
     z-index: 650;
@@ -276,9 +276,11 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    /* Top padding just clears the 32px titlebar drag strip. */
-    padding: 1.7rem 1rem 0.7rem;
+    /* Fixed height shared with the browse chrome so the two headers align. */
+    height: var(--panel-head-h, 52px);
+    padding: 0 1rem;
     border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
   }
   .head-text {
     flex: 1;

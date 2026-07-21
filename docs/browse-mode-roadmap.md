@@ -168,6 +168,19 @@ Rust (lib.rs)
     eval-with-result paths, native-handle security posture) for the
     Xeto Studio decision.
 
+### UX polish (done alongside Phase 3)
+- Collapsed-sidebar mode switching: the mode cards become a vertical stack
+  of icon buttons in the same spot (no force-expand on switch), with a
+  divider below them in both states.
+- Real minimal titlebar chrome: a fixed `--titlebar-h` strip (sidebar-dark,
+  draggable) replaces the invisible drag region; all surfaces (sidebar,
+  content, chat, browse chrome, research view) start below it and no
+  longer carry per-surface "clear the titlebar" padding hacks.
+- Header alignment: browse chrome, ChatPanel, and ResearchPanel headers
+  share a fixed `--panel-head-h` (52px) so they align by construction.
+- Windows note: the titlebar strip and all layout work is cross-platform
+  CSS; verify `decorations: false` behavior on a Windows build.
+
 ### Phase 4 — Conveniences (only after 1–3 prove out)
 10. "Pin current page" (requires current-URL tracking via navigation
     events — also unlocks a live address bar).

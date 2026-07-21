@@ -122,7 +122,7 @@
     /* Main-content overlay: starts after the nav rail (--sidebar-w from the
        layout) and leaves room on the right for the chat via rightOffset. */
     position: fixed;
-    top: 0;
+    top: var(--titlebar-h, 0px);
     left: var(--sidebar-w, 0px);
     right: 0;
     bottom: 0;
@@ -137,9 +137,10 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    /* Match the chat panel's header padding so the two align. */
-    /* Top padding just clears the 32px titlebar drag strip. */
-    padding: 1.7rem 1rem 0.7rem;
+    /* Fixed height shared with ChatPanel's header so the two align. */
+    height: var(--panel-head-h, 52px);
+    padding: 0 1rem;
+    flex-shrink: 0;
     border-bottom: 1px solid var(--border);
   }
   .glyph { display: inline-flex; color: var(--accent); flex-shrink: 0; }

@@ -56,8 +56,6 @@
   function setMode(m: "library" | "browse") {
     mode = m;
     localStorage.setItem(MODE_KEY, m);
-    // Browse mode needs the tree visible to be useful.
-    if (m === "browse" && collapsed) toggleCollapsed();
     // Leaving Browse while on /browse: navigate home so the browse page
     // unmounts and hides its native webview (which floats above HTML).
     if (m === "library" && $page.url.pathname.startsWith("/browse")) goto("/");
@@ -132,14 +130,14 @@
       <span class="brand-text"><strong>Clarity</strong><br />Make It Make Sense</span>
     </a>
 
-    <div class="mode-cards" class:hidden={collapsed}>
+    <div class="mode-cards">
       <button
         class="mode-card"
         class:on={mode === "library"}
         onclick={() => setMode("library")}
         title="Library mode"
       >
-        <Library size={15} /> Library
+        <Library size={15} /> <span class="mode-label">Library</span>
       </button>
       <button
         class="mode-card"
@@ -147,7 +145,7 @@
         onclick={() => setMode("browse")}
         title="Browse mode"
       >
-        <Globe size={15} /> Browse
+        <Globe size={15} /> <span class="mode-label">Browse</span>
       </button>
     </div>
 
@@ -268,25 +266,28 @@
     outline-offset: 2px;
   }
 
-  /* Transparent draggable strip overlaying the top so content can bleed
-     beneath the (hidden) titlebar while the window stays movable. */
+  :global(:root) { --titlebar-h: 38px; --panel-head-h: 52px; }
+  /* Real (but minimal) window chrome: a draggable strip matching the
+     sidebar rail. Everything below starts at --titlebar-h, so no surface
+     needs its own "clear the titlebar" padding anymore. */
   .titlebar {
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
-    height: 32px;
+    height: var(--titlebar-h);
     z-index: 900;
+    background: var(--sidebar-bg);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     -webkit-app-region: drag;
     app-region: drag;
   }
 
   .update-bar {
     position: sticky;
-    /* Offset below the titlebar drag strip so the full-width banner doesn't
-       cover the macOS traffic-light buttons (which would block their clicks). */
-    top: 32px;
-    margin-top: 32px;
+    /* Sits below the titlebar chrome. */
+    top: var(--titlebar-h);
+    margin-top: var(--titlebar-h);
     z-index: 800;
     display: flex;
     align-items: center;
@@ -365,21 +366,26 @@
     border-radius: 4px;
   }
 
-  .app { display: flex; align-items: flex-start; min-height: 100vh; }
+  .app {
+    display: flex;
+    align-items: flex-start;
+    min-height: calc(100vh - var(--titlebar-h));
+    margin-top: var(--titlebar-h);
+  }
   .sidebar {
     width: 220px;
     flex-shrink: 0;
     background: var(--sidebar-bg);
     color: var(--sidebar-text);
-    padding: 2.5rem 0.9rem 1.25rem;
+    padding: 0.9rem 0.9rem 1.25rem;
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
     border-right: 1px solid rgba(255, 255, 255, 0.05);
     /* Pin the nav so it stays put while the page content scrolls. */
     position: sticky;
-    top: 0;
-    height: 100vh;
+    top: var(--titlebar-h);
+    height: calc(100vh - var(--titlebar-h));
     overflow: hidden;
     transition: width 0.2s ease, padding 0.2s ease;
   }
@@ -420,9 +426,14 @@
   .mode-cards {
     display: flex;
     gap: 0.35rem;
+    padding-bottom: 0.6rem;
     margin-bottom: 0.55rem;
+    border-bottom: 1px solid var(--sidebar-border);
   }
-  .mode-cards.hidden { display: none; }
+  /* Collapsed rail: same spot, vertical stack of icon-only mode buttons. */
+  .sidebar.collapsed .mode-cards { flex-direction: column; align-items: center; }
+  .sidebar.collapsed .mode-label { display: none; }
+  .sidebar.collapsed .mode-card { flex: none; width: 34px; height: 34px; padding: 0; }
   .mode-card {
     flex: 1;
     display: inline-flex;
@@ -500,5 +511,5 @@
   }
   .version-link:hover { opacity: 1; color: var(--sidebar-text-bright); }
 
-  .content { flex: 1; min-width: 0; padding: 2.75rem 2.25rem 2rem; }
+  .content { flex: 1; min-width: 0; padding: 1.5rem 2.25rem 2rem; }
 </style>

@@ -6,6 +6,18 @@ use tauri::{LogicalPosition, LogicalSize, Manager, State, WebviewUrl, Window};
 /// Label of the single child webview used for the live research view.
 const RESEARCH_LABEL: &str = "research";
 
+/// Browser-equivalent user agent for browse/research webviews. Embedded
+/// webviews default to UAs that sites (notably Google) sniff as an
+/// unsupported browser; advertising the engine we actually are fixes
+/// login and "upgrade your browser" banners. Bump versions occasionally.
+#[cfg(target_os = "macos")]
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";
+#[cfg(not(target_os = "macos"))]
+const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
+AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 \
+Edg/126.0.0.0";
+
 /// Maximum number of live browse-tab webviews. Each is a full native
 /// webview instance, so evict least-recently-used beyond this cap
 /// (evicted tabs simply reload on next open).
@@ -68,7 +80,8 @@ fn open_research_view(
         return Ok(());
     }
 
-    let builder = WebviewBuilder::new(RESEARCH_LABEL, WebviewUrl::External(parsed));
+    let builder = WebviewBuilder::new(RESEARCH_LABEL, WebviewUrl::External(parsed))
+        .user_agent(BROWSER_UA);
     window
         .add_child(
             builder,
@@ -182,7 +195,8 @@ fn open_tab(
         return Ok(());
     }
 
-    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed));
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed))
+        .user_agent(BROWSER_UA);
     window
         .add_child(
             builder,

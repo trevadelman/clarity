@@ -200,6 +200,13 @@ Rust (lib.rs)
   Own feature (`kind: "command"` + shell plugin) if ever.
 - Tree polish: drag-and-drop, inline rename, spaces/workspaces.
 - Webview session/login management beyond the persistent default profile.
+  (Note: logins DO persist — tabs share WKWebView's default persistent
+  data store, so sessions survive tab eviction and app restarts. Spike
+  finding: sites sniff embedded-webview UAs as unsupported browsers
+  (Gmail showed "browser version no longer supported"), so tab/research
+  webviews now send a real browser UA — Safari on macOS, Edge/Chrome on
+  Windows (WebView2 is Chromium) — via a platform-conditional
+  `BROWSER_UA`. Bump versions occasionally.)
 
 ## Risks / open questions
 

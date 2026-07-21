@@ -221,6 +221,30 @@ Rust (lib.rs)
   reload button is always a hard reload: unregister SWs + clear Cache API
   + reload; cookies/logins untouched.)
 
+## Windows blockers (MUST be done before merging to main)
+
+The branch compiles and runs on Windows (all objc2 deps are
+macos-cfg-scoped), but these gaps must close before a Windows release:
+
+1. **`eval_in_tab` WebView2 twin** — the big one. Everything "Ask AI about
+   this page" (all page tools, navigate_to's readiness poll) currently
+   errors politely on Windows. Implement via `with_webview` →
+   `ICoreWebView2::ExecuteScript` (completion handler returns the JSON
+   result — same shape as the WKWebView path; use the `webview2-com`
+   crate wry already depends on). Write and test this on a Windows
+   machine, not blind.
+2. **Titlebar** — `titleBarStyle: "Overlay"` + `trafficLightPosition` are
+   macOS-only; Windows shows its native titlebar above our strip. Decide:
+   accept native titlebar, or `decorations: false` + custom min/max/close
+   buttons in the strip.
+3. **First-request UA on WebView2** — builder `.user_agent()` is believed
+   applied before the first request on Windows (the about:blank bootstrap
+   only exists for the macOS race). Verify with a UA-echo site; if it
+   races too, the fix is `ICoreWebView2Settings2::PutUserAgent` before
+   navigate.
+4. **Full Windows smoke test** of browse mode: tabs, LRU eviction, DnD
+   tree, hard reload, research view.
+
 ## Risks / open questions
 
 - **Memory:** N live WKWebViews is the cost of the Arc feel. Cap + LRU is

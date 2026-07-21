@@ -638,11 +638,11 @@ const REPO_TOOL_DECLARATIONS: FunctionDeclaration[] = [
   },
 ];
 
-/** Executes one named repo tool call and returns a JSON-serializable result. */
-export type RepoToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+/** Executes one named tool call and returns a JSON-serializable result. */
+export type ToolExecutor = (name: string, args: Record<string, unknown>) => Promise<unknown>;
 
 /** Reports a tool call for UI purposes (label plus the raw call details). */
-export type RepoToolReporter = (
+export type ToolReporter = (
   label: string,
   name: string,
   args: Record<string, unknown>
@@ -658,45 +658,44 @@ export interface RepoChatDigest {
 /** Fallback research-turn budget when the caller doesn't pass one. */
 const DEFAULT_TOOL_TURNS = 15;
 
+/** Everything one agentic chat run needs beyond the shared loop mechanics. */
+interface AgenticChatSpec {
+  systemInstruction: string;
+  toolDeclarations: FunctionDeclaration[];
+  /** Seed turns (context + primer) placed before the history. */
+  seed: object[];
+  /** Human-readable label for a tool call, shown in the chat UI. */
+  describe: (name: string, args: Record<string, unknown>) => string;
+  /** Error when the turn budget runs out without an answer. */
+  exceededMessage: string;
+}
+
 /**
- * Agentic repo Q&A: Gemini can call GitHub research tools (via `execute`)
- * in a loop before answering. `onToolCall` reports activity for the UI;
- * `maxToolTurns` caps how many research rounds are allowed.
+ * Shared agentic function-calling loop: ask Gemini, execute any requested
+ * tools, feed results back, repeat until it answers (or the turn budget
+ * runs out). Tracks token usage/cost across all turns.
  */
-export async function generateRepoChatReply(
+async function runAgenticChat(
   apiKey: string,
   question: string,
   history: ChatMessage[],
-  repoContext: string,
-  digests: RepoChatDigest[],
-  execute: RepoToolExecutor,
-  onToolCall: RepoToolReporter = () => {},
-  maxToolTurns: number = DEFAULT_TOOL_TURNS,
-  model: ModelId = DEFAULT_MODEL
+  spec: AgenticChatSpec,
+  execute: ToolExecutor,
+  onToolCall: ToolReporter,
+  maxToolTurns: number,
+  model: ModelId
 ): Promise<ChatReply> {
   const ai = client(apiKey);
 
-  const digestText = digests.length
-    ? digests
-        .map((d) => `## Digest (${d.label}, ${d.generatedAt})\n\n${d.text}`)
-        .join("\n\n")
-    : "(no saved change digests yet)";
-
   const contents: object[] = [
-    {
-      role: "user",
-      parts: [
-        { text: `${repoContext}\n\nSaved change digests:\n\n${digestText}` },
-      ],
-    },
-    { role: "model", parts: [{ text: "Understood. Ask me anything about this repository." }] },
+    ...spec.seed,
     ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
     { role: "user", parts: [{ text: question }] },
   ];
 
   const config = {
-    systemInstruction: REPO_CHAT_SYSTEM_PROMPT,
-    tools: [{ functionDeclarations: REPO_TOOL_DECLARATIONS }],
+    systemInstruction: spec.systemInstruction,
+    tools: [{ functionDeclarations: spec.toolDeclarations }],
   };
 
   let inputTokens = 0;
@@ -730,7 +729,7 @@ export async function generateRepoChatReply(
     for (const call of calls) {
       const name = call.name ?? "";
       const args = (call.args ?? {}) as Record<string, unknown>;
-      const label = describeToolCall(name, args);
+      const label = spec.describe(name, args);
       toolCalls.push(label);
       onToolCall(label, name, args);
       let result: unknown;
@@ -746,7 +745,45 @@ export async function generateRepoChatReply(
     contents.push({ role: "user", parts: responseParts });
   }
 
-  throw new Error("Repo research exceeded the tool-call limit without an answer.");
+  throw new Error(spec.exceededMessage);
+}
+
+/**
+ * Agentic repo Q&A: Gemini can call GitHub research tools (via `execute`)
+ * in a loop before answering. `onToolCall` reports activity for the UI;
+ * `maxToolTurns` caps how many research rounds are allowed.
+ */
+export function generateRepoChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  repoContext: string,
+  digests: RepoChatDigest[],
+  execute: ToolExecutor,
+  onToolCall: ToolReporter = () => {},
+  maxToolTurns: number = DEFAULT_TOOL_TURNS,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const digestText = digests.length
+    ? digests
+        .map((d) => `## Digest (${d.label}, ${d.generatedAt})\n\n${d.text}`)
+        .join("\n\n")
+    : "(no saved change digests yet)";
+
+  const spec: AgenticChatSpec = {
+    systemInstruction: REPO_CHAT_SYSTEM_PROMPT,
+    toolDeclarations: REPO_TOOL_DECLARATIONS,
+    seed: [
+      {
+        role: "user",
+        parts: [{ text: `${repoContext}\n\nSaved change digests:\n\n${digestText}` }],
+      },
+      { role: "model", parts: [{ text: "Understood. Ask me anything about this repository." }] },
+    ],
+    describe: describeToolCall,
+    exceededMessage: "Repo research exceeded the tool-call limit without an answer.",
+  };
+  return runAgenticChat(apiKey, question, history, spec, execute, onToolCall, maxToolTurns, model);
 }
 
 /** Human-readable label for a tool call, shown in the chat UI. */
@@ -823,82 +860,29 @@ const PAGE_TOOL_DECLARATIONS: FunctionDeclaration[] = [
 /**
  * Agentic page Q&A: Gemini pulls what it needs from the live page via the
  * extraction tools (executed by the caller against the active browse tab).
- * Mirrors `generateRepoChatReply`.
  */
-export async function generatePageChatReply(
+export function generatePageChatReply(
   apiKey: string,
   question: string,
   history: ChatMessage[],
   pageLabel: string,
   pageUrl: string,
-  execute: RepoToolExecutor,
-  onToolCall: RepoToolReporter = () => {},
+  execute: ToolExecutor,
+  onToolCall: ToolReporter = () => {},
   maxToolTurns: number = DEFAULT_TOOL_TURNS,
   model: ModelId = DEFAULT_MODEL
 ): Promise<ChatReply> {
-  const ai = client(apiKey);
-
-  const contents: object[] = [
-    {
-      role: "user",
-      parts: [{ text: `Open page: ${pageLabel}\nURL: ${pageUrl}` }],
-    },
-    { role: "model", parts: [{ text: "Understood. Ask me anything about this page." }] },
-    ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
-    { role: "user", parts: [{ text: question }] },
-  ];
-
-  const config = {
+  const spec: AgenticChatSpec = {
     systemInstruction: PAGE_CHAT_SYSTEM_PROMPT,
-    tools: [{ functionDeclarations: PAGE_TOOL_DECLARATIONS }],
+    toolDeclarations: PAGE_TOOL_DECLARATIONS,
+    seed: [
+      { role: "user", parts: [{ text: `Open page: ${pageLabel}\nURL: ${pageUrl}` }] },
+      { role: "model", parts: [{ text: "Understood. Ask me anything about this page." }] },
+    ],
+    describe: describePageToolCall,
+    exceededMessage: "Page research exceeded the tool-call limit without an answer.",
   };
-
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cachedTokens = 0;
-  const toolCalls: string[] = [];
-
-  for (let turn = 0; turn <= maxToolTurns; turn++) {
-    const response = await ai.models.generateContent({ model, config, contents });
-
-    const meta = response.usageMetadata;
-    inputTokens += meta?.promptTokenCount ?? 0;
-    outputTokens += (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
-    cachedTokens += meta?.cachedContentTokenCount ?? 0;
-
-    const calls = response.functionCalls;
-    if (!calls || calls.length === 0) {
-      const text = response.text;
-      if (!text) throw new Error("No answer returned from Gemini.");
-      const costUsd = estimateCost(model, inputTokens, outputTokens, cachedTokens);
-      void trackSpend(costUsd);
-      return { text, usage: { inputTokens, outputTokens, costUsd }, toolCalls };
-    }
-
-    const modelContent = response.candidates?.[0]?.content;
-    if (modelContent) contents.push(modelContent);
-
-    const responseParts: object[] = [];
-    for (const call of calls) {
-      const name = call.name ?? "";
-      const args = (call.args ?? {}) as Record<string, unknown>;
-      const label = describePageToolCall(name, args);
-      toolCalls.push(label);
-      onToolCall(label, name, args);
-      let result: unknown;
-      try {
-        result = await execute(name, args);
-      } catch (err) {
-        result = { error: err instanceof Error ? err.message : String(err) };
-      }
-      responseParts.push({
-        functionResponse: { name, id: call.id, response: { result } },
-      });
-    }
-    contents.push({ role: "user", parts: responseParts });
-  }
-
-  throw new Error("Page research exceeded the tool-call limit without an answer.");
+  return runAgenticChat(apiKey, question, history, spec, execute, onToolCall, maxToolTurns, model);
 }
 
 /** Human-readable label for a page tool call, shown in the chat UI. */

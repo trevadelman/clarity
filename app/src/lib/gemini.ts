@@ -761,6 +761,159 @@ function describeToolCall(name: string, args: Record<string, unknown>): string {
   }
 }
 
+const PAGE_CHAT_SYSTEM_PROMPT =
+  "You are a helpful assistant answering questions about the web page the " +
+  "user currently has open. You have LIVE read access to that page through " +
+  "the provided tools: page metadata, readable text, raw HTML, the user's " +
+  "text selection, and the page's links. Use them — start with get_page_text " +
+  "or get_page_meta rather than guessing. The page may be a JS-rendered app; " +
+  "the tools see the live DOM, not the original source.\n\n" +
+  "You can also NAVIGATE the user's visible tab with navigate_to — e.g. to " +
+  "follow a link found via get_page_links when the user asks what's there, " +
+  "or to do lightweight research across a site's pages. Navigation happens " +
+  "in the user's own tab where they can see it, so navigate only in service " +
+  "of the user's question, keep hops to a few, and return to answering " +
+  "promptly. Only http(s) URLs are allowed.\n\n" +
+  "You MAY draw on general knowledge beyond the page, but clearly mark that " +
+  "shift (e.g. 'Beyond this page: …'). Keep answers concise and use Markdown.";
+
+const PAGE_TOOL_DECLARATIONS: FunctionDeclaration[] = [
+  {
+    name: "get_page_meta",
+    description: "Get the open page's title, URL, meta description, and language.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "get_page_text",
+    description:
+      "Get the readable text content of the open page (live DOM, includes JS-rendered content).",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "get_page_html",
+    description:
+      "Get the open page's current DOM as HTML. Large; prefer get_page_text unless markup/attributes matter.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "get_selection",
+    description: "Get the text the user currently has selected on the page, if any.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "get_page_links",
+    description: "List the hyperlinks on the open page as {text, href} pairs.",
+    parameters: { type: Type.OBJECT, properties: {} },
+  },
+  {
+    name: "navigate_to",
+    description:
+      "Navigate the user's visible tab to a new http(s) URL and wait for it to load. " +
+      "Returns the landing page's metadata; use the read tools afterwards for content.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        url: { type: Type.STRING, description: "Absolute http(s) URL to open." },
+      },
+      required: ["url"],
+    },
+  },
+];
+
+/**
+ * Agentic page Q&A: Gemini pulls what it needs from the live page via the
+ * extraction tools (executed by the caller against the active browse tab).
+ * Mirrors `generateRepoChatReply`.
+ */
+export async function generatePageChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  pageLabel: string,
+  pageUrl: string,
+  execute: RepoToolExecutor,
+  onToolCall: RepoToolReporter = () => {},
+  maxToolTurns: number = DEFAULT_TOOL_TURNS,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const ai = client(apiKey);
+
+  const contents: object[] = [
+    {
+      role: "user",
+      parts: [{ text: `Open page: ${pageLabel}\nURL: ${pageUrl}` }],
+    },
+    { role: "model", parts: [{ text: "Understood. Ask me anything about this page." }] },
+    ...history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
+    { role: "user", parts: [{ text: question }] },
+  ];
+
+  const config = {
+    systemInstruction: PAGE_CHAT_SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: PAGE_TOOL_DECLARATIONS }],
+  };
+
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cachedTokens = 0;
+  const toolCalls: string[] = [];
+
+  for (let turn = 0; turn <= maxToolTurns; turn++) {
+    const response = await ai.models.generateContent({ model, config, contents });
+
+    const meta = response.usageMetadata;
+    inputTokens += meta?.promptTokenCount ?? 0;
+    outputTokens += (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+    cachedTokens += meta?.cachedContentTokenCount ?? 0;
+
+    const calls = response.functionCalls;
+    if (!calls || calls.length === 0) {
+      const text = response.text;
+      if (!text) throw new Error("No answer returned from Gemini.");
+      const costUsd = estimateCost(model, inputTokens, outputTokens, cachedTokens);
+      void trackSpend(costUsd);
+      return { text, usage: { inputTokens, outputTokens, costUsd }, toolCalls };
+    }
+
+    const modelContent = response.candidates?.[0]?.content;
+    if (modelContent) contents.push(modelContent);
+
+    const responseParts: object[] = [];
+    for (const call of calls) {
+      const name = call.name ?? "";
+      const args = (call.args ?? {}) as Record<string, unknown>;
+      const label = describePageToolCall(name, args);
+      toolCalls.push(label);
+      onToolCall(label, name, args);
+      let result: unknown;
+      try {
+        result = await execute(name, args);
+      } catch (err) {
+        result = { error: err instanceof Error ? err.message : String(err) };
+      }
+      responseParts.push({
+        functionResponse: { name, id: call.id, response: { result } },
+      });
+    }
+    contents.push({ role: "user", parts: responseParts });
+  }
+
+  throw new Error("Page research exceeded the tool-call limit without an answer.");
+}
+
+/** Human-readable label for a page tool call, shown in the chat UI. */
+function describePageToolCall(name: string, args: Record<string, unknown> = {}): string {
+  switch (name) {
+    case "navigate_to": return `Navigating to ${args.url}…`;
+    case "get_page_meta": return "Reading page details…";
+    case "get_page_text": return "Reading page content…";
+    case "get_page_html": return "Reading page HTML…";
+    case "get_selection": return "Reading your selection…";
+    case "get_page_links": return "Scanning page links…";
+    default: return `Running ${name}…`;
+  }
+}
+
 /** Delete a file from the Gemini File API. */
 export async function deleteFile(apiKey: string, name: string): Promise<void> {
   const ai = client(apiKey);

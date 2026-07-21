@@ -13,6 +13,7 @@
   import { toast } from "$lib/toast";
   import Toaster from "$lib/Toaster.svelte";
   import LinkTree from "$lib/LinkTree.svelte";
+  import { chatDocked } from "$lib/chatDock";
 
   let { children } = $props();
 
@@ -44,6 +45,13 @@
     collapsed = !collapsed;
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
   }
+
+  // When a chat panel docks, auto-collapse the sidebar so the content gets
+  // the screen (the chat is focused on it). One-way convenience: the user
+  // re-expands manually whenever they want.
+  $effect(() => {
+    if ($chatDocked && !collapsed) collapsed = true;
+  });
 
   function setMode(m: "library" | "browse") {
     mode = m;

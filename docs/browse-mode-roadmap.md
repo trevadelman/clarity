@@ -142,16 +142,31 @@ Rust (lib.rs)
    across ResearchPanel/ChatPanel/browse chrome, collapsed-sidebar Browse
    mode shows a vertical favicon rail, tree rows sized to match nav links.
 
-### Phase 3 — AI ↔ page interaction spike (promoted; the Studio deliverable)
-7. Extraction path: Rust `Webview::eval()` into the active tab. Note:
-   `eval` is fire-and-forget — the injected JS must post results back
-   (child webview built with IPC enabled → `invoke`/event back to Rust →
-   event to frontend). Prove: `outerHTML`, document title, selected text,
-   console errors.
-8. Feed extracted page content to ChatPanel as context ("ask about this
-   page"), docked beside the webview like the repo view.
-9. Write up findings (what's extractable, WKWebView/WebView2 differences,
-   IPC-into-child-webview security posture) for the Xeto Studio decision.
+### Phase 3 — AI ↔ page interaction spike ✅ (done; writeup pending)
+7. ✅ Extraction path solved WITHOUT child-webview IPC: Rust `eval_in_tab`
+   calls WKWebView's `evaluateJavaScript:completionHandler:` directly
+   (objc2/block2, versions matching wry's tree), so injected JS results
+   return synchronously — no init scripts or event plumbing needed.
+   `$lib/pageTools.ts` proves five extractions against the live DOM
+   (SPA-rendered included): meta, readable text, raw HTML, user
+   selection, links — each capped at 60K chars. Non-macOS returns a
+   clear "not implemented" error (spike finding: Windows needs the
+   WebView2 equivalent, `ExecuteScript`).
+8. ✅ "Ask AI" in the browse chrome docks the reused ChatPanel beside the
+   webview (per-tab session threads, tool trails, cost tracking).
+   `generatePageChatReply` mirrors the repo chat's agentic
+   function-calling loop with the extraction tools. Global UX:
+   `$lib/chatDock.ts` — any docked chat auto-collapses the sidebar
+   (one-way; user re-expands manually).
+9. ✅ Bonus (beyond plan): `navigate_to` tool — the AI can navigate the
+   user's visible tab (Rust `navigate_tab`, same http(s)-only policy),
+   with a readyState-poll load wait that returns landing-page meta.
+   Guardrails: visible-in-tab navigation only, tool-trail transparency,
+   15-turn cap, prompt instructs few purposeful hops. Interaction tools
+   (click/fill) deliberately deferred as too risky for the POC.
+10. ⏳ Write up findings (what's extractable, WKWebView vs WebView2
+    eval-with-result paths, native-handle security posture) for the
+    Xeto Studio decision.
 
 ### Phase 4 — Conveniences (only after 1–3 prove out)
 10. "Pin current page" (requires current-URL tracking via navigation
@@ -172,10 +187,11 @@ Rust (lib.rs)
 
 - **Memory:** N live WKWebViews is the cost of the Arc feel. Cap + LRU is
   the mitigation; measure real usage in the spike.
-- **IPC into child webviews:** Phase 3 requires the child webview to talk
-  back (eval alone is one-way). Expected path: build tabs with Tauri IPC
-  enabled and use events; needs verification against the `unstable`
-  feature's current capabilities — this is itself a spike finding.
+- **IPC into child webviews — RESOLVED (spike finding):** child-webview
+  IPC turned out to be unnecessary. Dropping to the native handle
+  (`with_webview` → WKWebView `evaluateJavaScript:completionHandler:`)
+  returns eval results directly. Cross-platform cost: needs a WebView2
+  `ExecuteScript` twin on Windows.
 - **Navigation tracking:** `on_navigation` is a build-time hook; per-nav
   events to the frontend need wiring. Deferred with Phase 4's address bar.
 - Arbitrary-site browsing in a persistent-profile native webview — fine

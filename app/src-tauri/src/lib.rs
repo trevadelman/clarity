@@ -260,6 +260,84 @@ fn tab_history(window: Window, id: String, action: String) -> Result<(), String>
     webview.eval(js).map_err(|e| e.to_string())
 }
 
+/// Navigate an open browse tab to a new http(s) URL (used by the AI's
+/// navigate tool; same URL policy as opening tabs).
+#[tauri::command]
+fn navigate_tab(window: Window, id: String, url: String) -> Result<(), String> {
+    let parsed = parse_http_url(&url)?;
+    let webview = window
+        .get_webview(&tab_label(&id))
+        .ok_or("Tab is not open.")?;
+    webview.navigate(parsed).map_err(|e| e.to_string())
+}
+
+/// Evaluate JS inside a browse tab and return its (string) result.
+///
+/// Tauri's `Webview::eval` is fire-and-forget, so for the AI page-extraction
+/// path we go one level down: on macOS, WKWebView's
+/// `evaluateJavaScript:completionHandler:` delivers the completion value.
+/// The injected JS must evaluate to a string (callers JSON.stringify
+/// structured results).
+#[tauri::command]
+async fn eval_in_tab(window: Window, id: String, js: String) -> Result<String, String> {
+    let webview = window
+        .get_webview(&tab_label(&id))
+        .ok_or("Tab is not open.")?;
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        webview
+            .with_webview(move |platform| {
+                use block2::RcBlock;
+                use objc2::runtime::AnyObject;
+                use objc2_foundation::{NSError, NSString};
+                use objc2_web_kit::WKWebView;
+
+                let wk: &WKWebView = unsafe { &*platform.inner().cast() };
+                let handler = RcBlock::new(move |result: *mut AnyObject, error: *mut NSError| {
+                    let out = if !error.is_null() {
+                        Err(unsafe { (*error).localizedDescription() }.to_string())
+                    } else if result.is_null() {
+                        Ok(String::new())
+                    } else {
+                        let obj = unsafe { &*result };
+                        match obj.downcast_ref::<NSString>() {
+                            Some(s) => Ok(s.to_string()),
+                            None => Err("Page script did not return a string.".into()),
+                        }
+                    };
+                    let _ = tx.send(out);
+                });
+                unsafe {
+                    wk.evaluateJavaScript_completionHandler(
+                        &NSString::from_str(&js),
+                        Some(&handler),
+                    );
+                }
+            })
+            .map_err(|e| e.to_string())?;
+
+        // The completion handler fires on the main thread; wait for it on a
+        // blocking-friendly thread so we don't stall the async runtime.
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(Duration::from_secs(10))
+                .map_err(|_| "Timed out reading from the page.".to_string())?
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = js;
+        Err("Page extraction is not implemented on this platform yet.".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -286,7 +364,9 @@ pub fn run() {
             close_tab,
             hide_all_tabs,
             close_all_tabs,
-            tab_history
+            tab_history,
+            navigate_tab,
+            eval_in_tab
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

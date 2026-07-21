@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import {
-    Globe, ExternalLink, X, ArrowLeft, ArrowRight, RotateCw,
+    Globe, ExternalLink, X, ArrowLeft, ArrowRight, RotateCw, MessageCircle,
   } from "lucide-svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import { selectedLink } from "$lib/browseState";
@@ -9,6 +9,12 @@
   import { openTab, setTabRect, closeTab, hideAllTabs, tabHistory } from "$lib/tabs";
   import type { Rect } from "$lib/researchView";
   import { toast } from "$lib/toast";
+  import ChatPanel from "$lib/ChatPanel.svelte";
+  import { generatePageChatReply, type ChatMessage } from "$lib/gemini";
+  import { loadApiKey } from "$lib/settings";
+  import {
+    getPageMeta, getPageText, getPageHtml, getSelection, getPageLinks, navigateTo,
+  } from "$lib/pageTools";
 
   // The native child webview renders above all HTML, so this page only
   // reserves screen space: the placeholder div's rect is reported to Rust,
@@ -16,6 +22,63 @@
   // repo research view).
   let placeholderEl = $state<HTMLElement | null>(null);
   let active = $state<BookmarkNode | null>(null);
+
+  // Page chat: one session-only thread per tab (keyed by bookmark id).
+  let chatOpen = $state(false);
+  let toolStatus = $state<string | null>(null);
+  let threads = $state<Record<string, ChatMessage[]>>({});
+  const messages = $derived(active ? (threads[active.id] ?? []) : []);
+
+  /** Executes one page tool against the active tab. */
+  async function runPageTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (!active) throw new Error("No page is open.");
+    const id = active.id;
+    switch (name) {
+      case "get_page_meta": return getPageMeta(id);
+      case "get_page_text": return getPageText(id);
+      case "get_page_html": return getPageHtml(id);
+      case "get_selection": return getSelection(id);
+      case "get_page_links": return getPageLinks(id);
+      case "navigate_to": return navigateTo(id, String(args.url ?? ""));
+      default: throw new Error(`Unknown page tool: ${name}`);
+    }
+  }
+
+  async function askPage(question: string) {
+    if (!active) return;
+    const tabId = active.id;
+    const apiKey = await loadApiKey();
+    if (!apiKey) {
+      toast.error("Set your Gemini API key in Settings first.");
+      return;
+    }
+    const history = threads[tabId] ?? [];
+    threads[tabId] = [...history, { role: "user", text: question, at: new Date().toISOString() }];
+    toolStatus = null;
+    try {
+      const reply = await generatePageChatReply(
+        apiKey, question, history, active.label, active.url ?? "",
+        runPageTool,
+        (label) => (toolStatus = label)
+      );
+      threads[tabId] = [
+        ...threads[tabId],
+        {
+          role: "model", text: reply.text, at: new Date().toISOString(),
+          costUsd: reply.usage.costUsd, toolCalls: reply.toolCalls,
+        },
+      ];
+    } catch (err) {
+      threads[tabId] = history; // roll back the optimistic user turn
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      toolStatus = null;
+    }
+  }
+
+  async function clearPageChat() {
+    if (active) threads[active.id] = [];
+  }
 
   function currentRect(): Rect | null {
     if (!placeholderEl) return null;
@@ -87,7 +150,7 @@
   });
 </script>
 
-<div class="surface">
+<div class="surface" class:chat-docked={chatOpen}>
   <header class="chrome">
     <div class="nav-btns">
       <button class="icon-btn" onclick={() => history("back")} disabled={!active} title="Back" aria-label="Back">
@@ -106,6 +169,9 @@
         <strong>{active.label}</strong>
         <span class="crumb" title={active.url}>{active.url}</span>
       </div>
+      <button class="chat-btn" class:on={chatOpen} onclick={() => (chatOpen = !chatOpen)} title="Ask AI about this page">
+        <MessageCircle size={14} /> Ask AI
+      </button>
       <button class="icon-btn" onclick={() => openUrl(active!.url!)} title="Open in browser" aria-label="Open in browser">
         <ExternalLink size={14} />
       </button>
@@ -130,6 +196,23 @@
   </div>
 </div>
 
+<!-- The native webview covers ChatPanel's floating FAB, so it's hidden;
+     the chrome bar's "Ask AI" button opens the panel instead. -->
+{#if active}
+  <div class="chat-wrap">
+    <ChatPanel
+    bind:open={chatOpen}
+    title={active.label}
+    {messages}
+    onAsk={askPage}
+    onClear={clearPageChat}
+    showScrim={false}
+    {toolStatus}
+      emptyHint="Ask about this page — the AI can read its live content."
+    />
+  </div>
+{/if}
+
 <style>
   .surface {
     /* Fill the content area edge-to-edge (the layout adds padding we undo). */
@@ -137,6 +220,12 @@
     height: 100vh;
     display: flex;
     flex-direction: column;
+    transition: margin-right 0.2s ease;
+  }
+  /* The native webview renders above HTML, so shrink out of the docked
+     chat's way (ResizeObserver re-syncs the tab rect). */
+  .surface.chat-docked {
+    margin-right: calc(min(420px, 92vw) - 2.25rem);
   }
   .chrome {
     display: flex;
@@ -148,6 +237,28 @@
     background: var(--surface);
   }
   .nav-btns { display: inline-flex; gap: 0.25rem; }
+  .chat-wrap :global(.fab) { display: none; }
+  .chat-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    height: 30px;
+    padding: 0 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .chat-btn:hover { background: var(--hover); color: var(--text); }
+  .chat-btn.on {
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    color: var(--accent);
+  }
   .icon-btn {
     display: grid;
     place-items: center;

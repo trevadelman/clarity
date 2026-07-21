@@ -3,6 +3,8 @@
   import { tick } from "svelte";
   import { marked } from "marked";
   import { MessageCircle, X, Send, Trash2, Film, Search, ChevronDown } from "lucide-svelte";
+  import { onDestroy } from "svelte";
+  import { chatDocked } from "$lib/chatDock";
   import type { ChatMessage } from "$lib/gemini";
 
   interface Props {
@@ -70,6 +72,12 @@
   $effect(() => {
     if (open && scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
   });
+
+  // Let the layout know a chat is docked (it auto-collapses the sidebar).
+  $effect(() => {
+    chatDocked.set(open);
+  });
+  onDestroy(() => chatDocked.set(false));
 
   async function submit() {
     const q = question.trim();

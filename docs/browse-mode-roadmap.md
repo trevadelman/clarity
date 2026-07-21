@@ -129,14 +129,18 @@ Rust (lib.rs)
    surface (replaced by the tab webviews in Phase 2). No DnD; order by
    added.
 
-### Phase 2 — Browsing surface with persistent tabs (the "Arc feel")
-4. Rust: multi-webview tab commands above (LRU cap, http(s)-only policy).
-5. `/browse` route: placeholder rect + rect reporting; clicking a tree
-   link opens/shows its tab. **Acceptance test: switching between two open
-   tree items is instant and preserves page state (scroll, form input,
-   playing video).**
-6. Minimal chrome: current tab's label/URL + open-in-browser + close tab.
-   Address bar / back-forward only if cheap (eval `history.back()`).
+### Phase 2 — Browsing surface with persistent tabs ✅ (done)
+4. ✅ Rust: tab command family (`open_tab` create-or-show, `set_tab_rect`,
+   `close_tab`, `hide_all_tabs`, `close_all_tabs`, `tab_history`) with
+   MRU/LRU cap of 4 live webviews and http(s)-only policy.
+5. ✅ `/browse` route: placeholder rect + ResizeObserver sync; tree links
+   open/show tabs. **Acceptance test passed** — switching between open
+   tabs is instant with page state preserved. Leaving `/browse` hides
+   (not destroys) tabs so state survives Library round-trips.
+6. ✅ Chrome bar: back/forward/reload (via eval), favicon + label + URL,
+   open-in-browser, close tab. Plus polish: header top padding trimmed
+   across ResearchPanel/ChatPanel/browse chrome, collapsed-sidebar Browse
+   mode shows a vertical favicon rail, tree rows sized to match nav links.
 
 ### Phase 3 — AI ↔ page interaction spike (promoted; the Studio deliverable)
 7. Extraction path: Rust `Webview::eval()` into the active tab. Note:

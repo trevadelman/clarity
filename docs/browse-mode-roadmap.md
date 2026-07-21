@@ -115,12 +115,18 @@ Rust (lib.rs)
 
 ## Implementation phases
 
-### Phase 1 — Mode switcher + minimal tree
-1. `+layout.svelte`: mode state (localStorage), mode cards, conditional
-   render of nav links vs. `LinkTree.svelte`.
-2. `$lib/bookmarks.ts`: store + CRUD.
-3. `$lib/LinkTree.svelte`: favorites row, folders + links with
-   expand/collapse, add/delete. Google-service favicons. No DnD; order by
+### Phase 1 — Mode switcher + minimal tree ✅ (done)
+1. ✅ `+layout.svelte`: mode cards (Library | Browse) persisted in
+   localStorage; Library mode unchanged; collapsed rail falls back to
+   classic icon nav.
+2. ✅ `$lib/bookmarks.ts`: store + CRUD, URL normalization, cascade
+   delete, Google-service favicons.
+3. ✅ `$lib/LinkTree.svelte`: favorites row, nested folders with
+   expand/collapse, add link/folder (top-level and inside folders), pin
+   favorite, delete. Plus trivial polish: double-click inline rename,
+   favicon error fallback to a generic icon.
+4. ✅ `/browse` route + `$lib/browseState.ts`: selected-link placeholder
+   surface (replaced by the tab webviews in Phase 2). No DnD; order by
    added.
 
 ### Phase 2 — Browsing surface with persistent tabs (the "Arc feel")

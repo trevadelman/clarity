@@ -1,8 +1,36 @@
+use std::sync::Mutex;
+
 use tauri::webview::WebviewBuilder;
-use tauri::{LogicalPosition, LogicalSize, Manager, WebviewUrl, Window};
+use tauri::{LogicalPosition, LogicalSize, Manager, State, WebviewUrl, Window};
 
 /// Label of the single child webview used for the live research view.
 const RESEARCH_LABEL: &str = "research";
+
+/// Maximum number of live browse-tab webviews. Each is a full native
+/// webview instance, so evict least-recently-used beyond this cap
+/// (evicted tabs simply reload on next open).
+const TAB_CAP: usize = 4;
+
+/// Tracks open browse tabs in most-recently-used order (front = newest).
+#[derive(Default)]
+struct TabState {
+    mru: Mutex<Vec<String>>,
+}
+
+/// Webview label for a browse tab id.
+fn tab_label(id: &str) -> String {
+    format!("tab-{id}")
+}
+
+/// Browse tabs may load any http(s) page; everything else is rejected
+/// (file:, data:, javascript:, ...).
+fn parse_http_url(url: &str) -> Result<tauri::Url, String> {
+    let parsed: tauri::Url = url.parse().map_err(|_| format!("Invalid URL: {url}"))?;
+    match parsed.scheme() {
+        "https" | "http" => Ok(parsed),
+        _ => Err(format!("URL not allowed in browse tab: {url}")),
+    }
+}
 
 /// Only allow the research view to display GitHub pages.
 fn parse_github_url(url: &str) -> Result<tauri::Url, String> {
@@ -90,6 +118,148 @@ fn close_research_view(window: Window) -> Result<(), String> {
     Ok(())
 }
 
+// --------------------------------------------------------------------------
+// Browse-mode tabs: multiple persistent child webviews, one visible at a
+// time. Switching shows an already-loaded webview (instant, stateful)
+// instead of navigating a shared one.
+// --------------------------------------------------------------------------
+
+/// Move `id` to the front of the MRU list and return labels to evict
+/// (anything beyond TAB_CAP).
+fn touch_tab(state: &State<TabState>, id: &str) -> Vec<String> {
+    let mut mru = state.mru.lock().unwrap();
+    mru.retain(|x| x != id);
+    mru.insert(0, id.to_string());
+    let keep = TAB_CAP.min(mru.len());
+    mru.split_off(keep).iter().map(|x| tab_label(x)).collect()
+}
+
+/// Hide every tab webview except `keep` (pass None to hide all).
+fn hide_other_tabs(window: &Window, keep: Option<&str>) {
+    let keep_label = keep.map(tab_label);
+    for webview in window.webviews() {
+        let label = webview.label().to_string();
+        if label.starts_with("tab-") && Some(&label) != keep_label.as_ref() {
+            let _ = webview.hide();
+        }
+    }
+}
+
+/// Open a browse tab: create its webview if needed, otherwise just show
+/// it (preserving its loaded state). Hides all other tabs and applies
+/// LRU eviction beyond the cap.
+#[tauri::command]
+fn open_tab(
+    window: Window,
+    state: State<TabState>,
+    id: String,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let parsed = parse_http_url(&url)?;
+    let label = tab_label(&id);
+
+    let evict = touch_tab(&state, &id);
+    for victim in evict {
+        if let Some(webview) = window.get_webview(&victim) {
+            let _ = webview.close();
+        }
+    }
+
+    hide_other_tabs(&window, Some(&id));
+
+    if let Some(existing) = window.get_webview(&label) {
+        existing
+            .set_position(LogicalPosition::new(x, y))
+            .map_err(|e| e.to_string())?;
+        existing
+            .set_size(LogicalSize::new(width, height))
+            .map_err(|e| e.to_string())?;
+        existing.show().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed));
+    window
+        .add_child(
+            builder,
+            LogicalPosition::new(x, y),
+            LogicalSize::new(width, height),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Reposition/resize the visible tab webviews (logical pixels).
+#[tauri::command]
+fn set_tab_rect(
+    window: Window,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    for webview in window.webviews() {
+        if webview.label().starts_with("tab-") {
+            webview
+                .set_position(LogicalPosition::new(x, y))
+                .map_err(|e| e.to_string())?;
+            webview
+                .set_size(LogicalSize::new(width, height))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Close one browse tab.
+#[tauri::command]
+fn close_tab(window: Window, state: State<TabState>, id: String) -> Result<(), String> {
+    state.mru.lock().unwrap().retain(|x| x != &id);
+    if let Some(webview) = window.get_webview(&tab_label(&id)) {
+        webview.close().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Hide all browse tabs without destroying them (leaving /browse keeps
+/// page state for when the user comes back).
+#[tauri::command]
+fn hide_all_tabs(window: Window) -> Result<(), String> {
+    hide_other_tabs(&window, None);
+    Ok(())
+}
+
+/// Destroy all browse tabs.
+#[tauri::command]
+fn close_all_tabs(window: Window, state: State<TabState>) -> Result<(), String> {
+    state.mru.lock().unwrap().clear();
+    for webview in window.webviews() {
+        if webview.label().starts_with("tab-") {
+            let _ = webview.close();
+        }
+    }
+    Ok(())
+}
+
+/// Run history navigation (back/forward) or reload in a tab webview.
+#[tauri::command]
+fn tab_history(window: Window, id: String, action: String) -> Result<(), String> {
+    let webview = window
+        .get_webview(&tab_label(&id))
+        .ok_or("Tab is not open.")?;
+    let js = match action.as_str() {
+        "back" => "history.back()",
+        "forward" => "history.forward()",
+        "reload" => "location.reload()",
+        _ => return Err(format!("Unknown history action: {action}")),
+    };
+    webview.eval(js).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default();
@@ -100,6 +270,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init());
 
     builder
+        .manage(TabState::default())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -109,7 +280,13 @@ pub fn run() {
             open_research_view,
             navigate_research_view,
             set_research_view_rect,
-            close_research_view
+            close_research_view,
+            open_tab,
+            set_tab_rect,
+            close_tab,
+            hide_all_tabs,
+            close_all_tabs,
+            tab_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

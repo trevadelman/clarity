@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { page } from "$app/stores";
+  import { goto } from "$app/navigation";
   import { getVersion } from "@tauri-apps/api/app";
   import {
     Library, Plus, Settings, Moon, Sun, Video, Download, X,
@@ -49,6 +50,9 @@
     localStorage.setItem(MODE_KEY, m);
     // Browse mode needs the tree visible to be useful.
     if (m === "browse" && collapsed) toggleCollapsed();
+    // Leaving Browse while on /browse: navigate home so the browse page
+    // unmounts and hides its native webview (which floats above HTML).
+    if (m === "library" && $page.url.pathname.startsWith("/browse")) goto("/");
   }
 
   function isActive(href: string, path: string): boolean {

@@ -4,13 +4,14 @@
   import { getVersion } from "@tauri-apps/api/app";
   import {
     Library, Plus, Settings, Moon, Sun, Video, Download, X,
-    PanelLeftClose, PanelLeftOpen, ChevronDown,
+    PanelLeftClose, PanelLeftOpen, ChevronDown, Globe,
   } from "lucide-svelte";
   import { marked } from "marked";
   import { theme, toggleTheme, initTheme } from "$lib/theme";
   import { checkForUpdate, installUpdate, isVersionDismissed, dismissVersion, type UpdateInfo } from "$lib/updates";
   import { toast } from "$lib/toast";
   import Toaster from "$lib/Toaster.svelte";
+  import LinkTree from "$lib/LinkTree.svelte";
 
   let { children } = $props();
 
@@ -21,10 +22,16 @@
   ];
 
   const COLLAPSE_KEY = "sidebarCollapsed";
+  const MODE_KEY = "sidebarMode";
 
   let update = $state<UpdateInfo | null>(null);
   let collapsed = $state(
     typeof localStorage !== "undefined" && localStorage.getItem(COLLAPSE_KEY) !== "0"
+  );
+  let mode = $state<"library" | "browse">(
+    typeof localStorage !== "undefined" && localStorage.getItem(MODE_KEY) === "browse"
+      ? "browse"
+      : "library"
   );
   let installing = $state(false);
   let progressPct = $state<number | null>(null);
@@ -35,6 +42,13 @@
   function toggleCollapsed() {
     collapsed = !collapsed;
     localStorage.setItem(COLLAPSE_KEY, collapsed ? "1" : "0");
+  }
+
+  function setMode(m: "library" | "browse") {
+    mode = m;
+    localStorage.setItem(MODE_KEY, m);
+    // Browse mode needs the tree visible to be useful.
+    if (m === "browse" && collapsed) toggleCollapsed();
   }
 
   function isActive(href: string, path: string): boolean {
@@ -106,19 +120,42 @@
       <span class="brand-text"><strong>Clarity</strong><br />Make It Make Sense</span>
     </a>
 
-    <div class="links">
-      {#each links as l (l.href)}
-        {@const Icon = l.icon}
-        <a
-          href={l.href}
-          class:active={isActive(l.href, $page.url.pathname)}
-          title={l.label}
-        >
-          <Icon size={17} />
-          <span class="link-label">{l.label}</span>
-        </a>
-      {/each}
+    <div class="mode-cards" class:hidden={collapsed}>
+      <button
+        class="mode-card"
+        class:on={mode === "library"}
+        onclick={() => setMode("library")}
+        title="Library mode"
+      >
+        <Library size={15} /> Library
+      </button>
+      <button
+        class="mode-card"
+        class:on={mode === "browse"}
+        onclick={() => setMode("browse")}
+        title="Browse mode"
+      >
+        <Globe size={15} /> Browse
+      </button>
     </div>
+
+    {#if mode === "library" || collapsed}
+      <div class="links">
+        {#each links as l (l.href)}
+          {@const Icon = l.icon}
+          <a
+            href={l.href}
+            class:active={isActive(l.href, $page.url.pathname)}
+            title={l.label}
+          >
+            <Icon size={17} />
+            <span class="link-label">{l.label}</span>
+          </a>
+        {/each}
+      </div>
+    {:else}
+      <LinkTree />
+    {/if}
 
     <div class="bottom-row">
       <button class="icon-btn" onclick={toggleTheme} aria-label="Toggle theme" title="Toggle theme">
@@ -367,6 +404,35 @@
   }
   .brand-text { font-size: 0.82rem; line-height: 1.2; color: var(--sidebar-text-dim); white-space: nowrap; }
   .brand-text strong { color: var(--sidebar-text-bright); font-size: 0.95rem; }
+
+  .mode-cards {
+    display: flex;
+    gap: 0.35rem;
+    margin-bottom: 0.55rem;
+  }
+  .mode-cards.hidden { display: none; }
+  .mode-card {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    border: 1px solid var(--sidebar-border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--sidebar-text);
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0.42rem 0.3rem;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .mode-card:hover { background: var(--sidebar-hover); color: var(--sidebar-text-bright); }
+  .mode-card.on {
+    background: rgba(109, 94, 252, 0.16);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--sidebar-border));
+    color: var(--sidebar-text-bright);
+  }
 
   .links { display: flex; flex-direction: column; gap: 0.2rem; }
   .links a {

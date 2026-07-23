@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw, GitBranch, Info, DollarSign, Trash2, Wrench } from "lucide-svelte";
+  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw, GitBranch, Info, DollarSign, Trash2, Wrench, Globe } from "lucide-svelte";
+  import { invoke } from "@tauri-apps/api/core";
   import {
     loadApiKey, saveApiKey, loadPrompt, savePrompt,
     loadDiagramPrompt, saveDiagramPrompt,
@@ -22,6 +23,8 @@
   let tokenHelpOpen = $state(false);
   let spend = $state<SpendInfo>({ totalUsd: 0, since: null });
   let maxToolTurns = $state(DEFAULT_MAX_TOOL_TURNS);
+  let confirmClear = $state(false);
+  let clearing = $state(false);
 
   onMount(async () => {
     apiKey = await loadApiKey();
@@ -82,6 +85,22 @@
   function handleReset() {
     prompt = DEFAULT_PROMPT;
     toast.info("Prompt reset to default (not yet saved).");
+  }
+  async function handleClearBrowsingData() {
+    if (!confirmClear) {
+      confirmClear = true;
+      return;
+    }
+    confirmClear = false;
+    clearing = true;
+    try {
+      await invoke("clear_browsing_data");
+      toast.success("Browsing data cleared — you've been signed out of all sites.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      clearing = false;
+    }
   }
   async function handleSaveDiagramPrompt() {
     await saveDiagramPrompt(diagramPrompt);
@@ -204,6 +223,28 @@
 </section>
 
 <section class="card">
+  <div class="card-head"><Globe size={17} /><h2>Browser</h2></div>
+  <div class="row">
+    <span class="version">Browse-mode sessions &amp; site data</span>
+    <button class="btn" onclick={() => invoke("open_devtools")} title="Open the developer console for debugging">
+      <Wrench size={14} /> Open console
+    </button>
+    {#if confirmClear}
+      <button class="btn" onclick={() => (confirmClear = false)}>Cancel</button>
+    {/if}
+    <button class="btn danger" onclick={handleClearBrowsingData} disabled={clearing}>
+      <Trash2 size={14} />
+      {clearing ? "Clearing…" : confirmClear ? "Confirm clear" : "Clear browsing data"}
+    </button>
+  </div>
+  <p class="hint">
+    Signs you out of every site by deleting cookies, site storage, and caches
+    used by browse tabs and the research view. Open tabs reload from scratch.
+    App settings, your library, and API keys are not affected.
+  </p>
+</section>
+
+<section class="card">
   <div class="card-head"><RefreshCw size={17} /><h2>About &amp; Updates</h2></div>
   <div class="row">
     <span class="version">Clarity{version ? ` v${version}` : ""}</span>
@@ -270,6 +311,8 @@
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
   .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .btn.danger { color: #e5484d; border-color: color-mix(in srgb, #e5484d 40%, var(--border)); }
+  .btn.danger:hover:not(:disabled) { background: color-mix(in srgb, #e5484d 10%, var(--surface)); }
 
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0.6rem 0 0; }
 

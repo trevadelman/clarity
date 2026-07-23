@@ -111,11 +111,12 @@ fn add_browser_webview(
         match wb.build() {
             Ok(window) => NewWindowResponse::Create { window },
             Err(e) => {
-                eprintln!("failed to open popup window: {e}");
+                log::warn!("failed to open popup window: {e}");
                 NewWindowResponse::Deny
             }
         }
     });
+    log::info!("add_browser_webview({label}): adding child webview");
     let webview = window
         .add_child(
             builder,
@@ -123,6 +124,7 @@ fn add_browser_webview(
             LogicalSize::new(width, height),
         )
         .map_err(|e| e.to_string())?;
+    log::info!("add_browser_webview({label}): child added");
 
     #[cfg(target_os = "macos")]
     webview
@@ -136,10 +138,13 @@ fn add_browser_webview(
 
     // Same belt-and-suspenders on Windows: set the UA on the WebView2
     // settings before the first real navigation, in case the builder
-    // option races it like WKWebView's does.
+    // option races it like WKWebView's does. Non-fatal: the builder's
+    // user_agent() already applies on Windows; this only closes a
+    // theoretical race.
     #[cfg(windows)]
-    webview
-        .with_webview(|platform| {
+    {
+        log::info!("add_browser_webview({label}): setting WebView2 UA");
+        let ua_result = webview.with_webview(|platform| {
             use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings2;
             use windows::core::{Interface, HSTRING, PCWSTR};
 
@@ -150,12 +155,19 @@ fn add_browser_webview(
                 unsafe { settings.SetUserAgent(PCWSTR(ua.as_ptr())) }
             };
             if let Err(e) = apply() {
-                eprintln!("failed to set WebView2 user agent: {e}");
+                log::warn!("failed to set WebView2 user agent: {e}");
             }
-        })
-        .map_err(|e| e.to_string())?;
+        });
+        if let Err(e) = ua_result {
+            log::warn!("with_webview for UA failed: {e}");
+        }
+        log::info!("add_browser_webview({label}): UA step done");
+    }
 
-    webview.navigate(url).map_err(|e| e.to_string())
+    log::info!("add_browser_webview({label}): navigating to {url}");
+    let out = webview.navigate(url).map_err(|e| e.to_string());
+    log::info!("add_browser_webview({label}): navigate returned {out:?}");
+    out
 }
 
 /// Browse tabs may load any http(s) page; everything else is rejected
@@ -519,6 +531,123 @@ async fn eval_in_tab(window: Window, id: String, js: String) -> Result<String, S
     }
 }
 
+/// Open devtools for the main app webview — the "Open console" button in
+/// Settings, for debugging shipped builds (devtools feature is enabled in
+/// release).
+#[tauri::command]
+fn open_devtools(window: Window) {
+    if let Some(webview) = window.get_webview("main") {
+        webview.open_devtools();
+    }
+}
+
+/// Clear all website data (cookies, local/session storage, IndexedDB,
+/// service workers, caches) for the browse/research webviews — the
+/// "sign me out of everything" escape hatch in Settings. App state is
+/// untouched: settings/library live in tauri-plugin-store files.
+#[tauri::command]
+async fn clear_browsing_data(window: Window, state: State<'_, TabState>) -> Result<(), String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+
+    #[cfg(target_os = "macos")]
+    {
+        // The default WKWebsiteDataStore is shared by every child webview;
+        // clearing it clears them all. Must run on the main thread.
+        let tx = tx.clone();
+        window
+            .app_handle()
+            .run_on_main_thread(move || {
+                use block2::RcBlock;
+                use objc2_foundation::{MainThreadMarker, NSDate};
+                use objc2_web_kit::WKWebsiteDataStore;
+
+                let mtm = MainThreadMarker::new().expect("main thread");
+                let store = unsafe { WKWebsiteDataStore::defaultDataStore(mtm) };
+                let types = unsafe { WKWebsiteDataStore::allWebsiteDataTypes(mtm) };
+                let done_tx = tx.clone();
+                let handler = RcBlock::new(move || {
+                    let _ = done_tx.send(Ok(()));
+                });
+                unsafe {
+                    store.removeDataOfTypes_modifiedSince_completionHandler(
+                        &types,
+                        &NSDate::distantPast(),
+                        &handler,
+                    );
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(windows)]
+    {
+        // The profile is reachable only through a live webview; browse
+        // tabs and the research view all share the app's profile.
+        let webview = window
+            .webviews()
+            .into_iter()
+            .find(|w| w.label().starts_with("tab-") || w.label() == RESEARCH_LABEL)
+            .ok_or("Open a browse tab first, then clear browsing data.")?;
+        let tx = tx.clone();
+        webview
+            .with_webview(move |platform| {
+                use webview2_com::ClearBrowsingDataCompletedHandler;
+                use webview2_com::Microsoft::Web::WebView2::Win32::{
+                    ICoreWebView2Profile2, ICoreWebView2_13,
+                };
+                use windows::core::Interface;
+
+                let apply = |tx: mpsc::Sender<Result<(), String>>| -> windows::core::Result<()> {
+                    let core = unsafe { platform.controller().CoreWebView2() }?;
+                    let core13: ICoreWebView2_13 = core.cast()?;
+                    let profile: ICoreWebView2Profile2 = unsafe { core13.Profile() }?.cast()?;
+                    let handler = ClearBrowsingDataCompletedHandler::create(Box::new(
+                        move |error_code| {
+                            let _ = tx.send(error_code.map_err(|e| e.to_string()));
+                            Ok(())
+                        },
+                    ));
+                    unsafe { profile.ClearBrowsingDataAll(&handler) }
+                };
+                if let Err(e) = apply(tx.clone()) {
+                    let _ = tx.send(Err(e.to_string()));
+                }
+            })
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = &tx;
+        return Err("Clearing browsing data is not implemented on this platform yet.".into());
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        drop(tx);
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(Duration::from_secs(10))
+                .map_err(|_| "Timed out clearing browsing data.".to_string())?
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+
+        // Live webviews hold their sessions in memory; destroy them so the
+        // next tab open starts from the cleared state.
+        state.mru.lock().unwrap().clear();
+        for webview in window.webviews() {
+            let label = webview.label();
+            if label.starts_with("tab-") || label == RESEARCH_LABEL {
+                let _ = webview.close();
+            }
+        }
+        Ok(())
+    }
+}
+
 /// ExecuteScript returns the JS value JSON-encoded; our contract (matching
 /// the WKWebView path) is the plain string the page script evaluated to.
 #[cfg(windows)]
@@ -541,6 +670,17 @@ pub fn run() {
 
     builder
         .manage(TabState::default())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("clarity".into()),
+                    }),
+                ])
+                .build(),
+        )
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -558,7 +698,9 @@ pub fn run() {
             close_all_tabs,
             tab_history,
             navigate_tab,
-            eval_in_tab
+            eval_in_tab,
+            clear_browsing_data,
+            open_devtools
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

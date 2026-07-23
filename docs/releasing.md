@@ -7,6 +7,15 @@ KeyLocker EV) — plus the merged `latest.json` the auto-updater consumes.
 
 ## Per-release checklist (CI flow)
 
+0. **Vet the Windows build first (no signatures consumed).** Run the
+   unsigned test build against the release branch, install it on a
+   Windows machine, and smoke-test before tagging anything:
+   ```bash
+   gh workflow run windows-build-unsigned.yml --ref <branch>
+   gh run watch && gh run download <run-id>
+   ```
+   (SmartScreen's "Unknown publisher" warning is expected — it's
+   unsigned.) Only tag once the artifact has been fully vetted.
 1. Bump the version in `app/package.json` and
    `app/src-tauri/tauri.conf.json` (must match), rewrite
    `docs/release-notes.md` for this version (CI uses it for both the

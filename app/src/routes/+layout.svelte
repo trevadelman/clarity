@@ -17,6 +17,16 @@
 
   let { children } = $props();
 
+  // The frameless-overlay titlebar (tauri.conf.json `titleBarStyle: Overlay`)
+  // is macOS-only; Windows keeps its native titlebar. So the CSS titlebar
+  // strip — and the space everything reserves for it — only exists on macOS.
+  // Detected synchronously so there's no layout flash.
+  const isMac =
+    typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
+  if (typeof document !== "undefined" && !isMac) {
+    document.documentElement.style.setProperty("--titlebar-h", "0px");
+  }
+
   const links = [
     { href: "/", label: "Library", icon: Library },
     { href: "/add", label: "Add source", icon: Plus },
@@ -93,7 +103,9 @@
   });
 </script>
 
-<div class="titlebar" data-tauri-drag-region></div>
+{#if isMac}
+  <div class="titlebar" data-tauri-drag-region></div>
+{/if}
 
 {#if update}
   <div class="update-bar">

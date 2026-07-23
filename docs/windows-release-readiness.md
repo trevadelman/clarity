@@ -31,9 +31,10 @@ expected; click through. This workflow never touches releases,
 | # | Blocker | Status |
 |---|---------|--------|
 | 1 | `eval_in_tab` WebView2 twin | ☐ not started |
-| 2 | Windows titlebar | ☐ undecided |
+| 2 | Windows titlebar | ✅ resolved — mac Overlay chrome, native on Windows |
 | 3 | First-request UA on WebView2 | ☐ unverified |
 | 4 | Full Windows smoke test | ☐ not run |
+| 5 | OAuth / popup-window handling | ☐ not started (**mandatory** pre-release) |
 
 ### 1. `eval_in_tab` WebView2 twin — the big one
 
@@ -51,12 +52,25 @@ Alternative if it slips: gate the "Ask AI" UI behind a platform check so
 Windows users see a clear "not available on Windows yet" state instead
 of tool errors mid-chat.
 
-### 2. Titlebar
+### 2. Titlebar — ✅ resolved
 
-`titleBarStyle: "Overlay"` + `trafficLightPosition` are macOS-only;
-Windows shows its native titlebar stacked above our custom strip.
-Decide: accept the native titlebar, or `decorations: false` + custom
-min/max/close buttons in the strip.
+The original problem: `titleBarStyle: "Overlay"` + the draggable HTML strip
+is macOS-only, so Windows got double chrome (native titlebar *plus* the
+38px strip). Resolution is platform-conditional chrome, not a revert:
+
+- **macOS** keeps the Overlay config and the CSS titlebar strip — this is
+  load-bearing, because with Overlay the main webview spans the full window
+  frame, so DOM coordinates and child-webview (frame-anchored) coordinates
+  are identical by construction. No offset code exists or is needed.
+- **Windows** ignores the Overlay options (native titlebar), and the layout
+  sets `--titlebar-h: 0px` and skips the strip, so content starts directly
+  below the native titlebar. Child webviews are positioned in client-area
+  coordinates on Windows, which already exclude the titlebar — alignment
+  again holds with no offset.
+
+A native-titlebar-everywhere revert was attempted and abandoned: it forces
+a 28px child-webview offset on macOS that no tao/tauri geometry API can
+measure (all report content == frame under the hood).
 
 ### 3. First-request UA on WebView2
 
@@ -69,7 +83,22 @@ Verify with a UA-echo site; if it races too, the fix is
 
 Browse mode end to end on the EC2 box: tabs open/switch instantly, LRU
 eviction at 4, DnD tree, hard reload, research view, logins persist
-across restarts, titlebar/window chrome acceptable.
+across restarts, titlebar/window chrome acceptable (native titlebar, no
+double chrome, `--titlebar-h` is 0), and child-webview alignment correct
+under the native titlebar at 100%/125%/150% DPI.
+
+### 5. OAuth / popup-window handling — mandatory pre-release
+
+Sites that authenticate via a popup window (`window.open` — Google, GitHub
+"Sign in with Google", Microsoft, etc.) are not handled in the browse/research
+webviews on **either** platform. An uncaptured `window.open()` in a child
+webview is silently swallowed or spawns an untracked native popup, so those
+logins can't complete.
+
+This is a missing feature (not a platform bug) and is a hard blocker for
+shipping Browse mode. Design one OS-agnostic approach via wry's new-window
+hook (open the requested URL as another managed tab, or force a
+redirect-based flow), then test it on Windows **and** locally on macOS.
 
 ## Test log
 

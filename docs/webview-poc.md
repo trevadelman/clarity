@@ -1,8 +1,8 @@
 # Webview POC — Live Research View + Browse Mode
 
-> **Status: implemented on `webview-poc` (macOS-complete).** Everything
-> below is built and working on macOS. Windows has known gaps — see
-> `docs/windows-release-readiness.md`, the release gate for this branch.
+> **Status: shipped in v2.0.0** (merged to main; Windows verified on a
+> real machine). Browse mode is opt-in via *Settings → Browser*. Kept as
+> a historical design/implementation record.
 
 One continuous effort in two stages, both on the `webview-poc` branch:
 

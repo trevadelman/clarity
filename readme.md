@@ -1,78 +1,86 @@
 # Clarity
 
-A lightweight macOS desktop app (Tauri v2 + SvelteKit) that takes a local
-video, sends it to Google Gemini for multimodal understanding, and returns a structured
-written summary.
-
-See `init.md` for the full MVP spec.
+A cross-platform desktop app (Tauri v2 + SvelteKit, macOS + Windows) that
+turns videos, links, and GitHub repositories into structured, searchable
+knowledge with Google Gemini — plus an opt-in research browser built in.
 
 ## Layout
 
-
 - `app/` — the Tauri + SvelteKit desktop app.
+- `docs/` — releasing process, release notes, and design/readiness docs.
 
+## Features
 
-## App — development
+**Library**
+- **Multiple source types** — local videos, Loom and YouTube links, and
+  GitHub repositories. Repos become activity trackers with browsable
+  commits and AI change digests.
+- **AI summaries** — structured Markdown summaries via Gemini
+  (`gemini-2.5-flash`), with editable default prompts and per-source
+  custom instructions.
+- **Per-source chat** — clickable timestamps for videos; agentic,
+  code-aware research (file reads, diffs, searches) for repos.
+- **Ask your library** — chat across every summarized source at once,
+  with answers that cite and link to their sources.
+- **Learning diagrams & highlights** — AI-generated conceptual diagrams
+  and key-moment screenshots.
+- **Spend tracking** — estimated Gemini cost tracked locally, visible in
+  Settings.
+
+**Browse mode (opt-in beta)**
+- Enable in *Settings → Browser*. Adds a Browse rail to the sidebar:
+  - A curated **link tree** (folders, favicons) of the sites you work in.
+  - **Persistent browser tabs** — native webviews that stay signed in
+    across sessions; OAuth popups (Google/GitHub/etc.) work.
+  - **Page-aware AI** — chat about the page you're viewing; the assistant
+    can read and navigate your open tabs.
+  - **Clear browsing data** in Settings signs you out of every site
+    without touching the library or keys.
+
+**App**
+- Auto-updates on both platforms (signed releases + `latest.json`).
+- Light/dark theme, collapsible sidebar, local-first storage.
+
+## Development
 
 ```bash
 cd app
 npm install
-npm run tauri dev      # launches the native macOS window
+npm run tauri dev      # launches the native window
 ```
 
-Features:
-- **Local video library** — videos are copied into the app data dir and listed in
-  a Library view. This is the source of truth; the list shows only your local videos.
-- **Multi-page UI** — Library (`/`), Add video (`/add`), video detail
-  (`/video/[id]`), and Settings (`/settings`), with a persistent sidebar nav.
-- **Lazy / self-healing Gemini uploads** — a video is uploaded to the Gemini File
-  API only when you summarize it. On each summarize the app checks whether the
-  existing Gemini file is still `ACTIVE`; if it's missing or expired (~48h), it
-  re-uploads from the local copy and remaps automatically.
-- Drag-and-drop (or click to choose) to add a video.
-- Editable, persisted summary prompt in Settings (with reset-to-default).
-- **Per-video custom instructions** — each video's page has an optional
-  "Custom instructions" panel whose summary/diagram text is appended to the
-  default prompts for that video only (persisted per video).
-- Single summary stored per video (re-summarize overwrites it).
-- Summary rendered as Markdown, with **Copy** and **Export .md**.
-- **Delete** removes the local copy, the stored summary, and the Gemini upload
-  (with a confirmation prompt).
+The browser dev server (`npm run dev`) renders the UI but cannot call the
+Tauri plugins or native webviews — use `npm run tauri dev` for full
+functionality.
 
-Data:
-- `settings.json` (plugin-store) — API key + default prompt.
-- `library.json` (plugin-store) — `VideoRecord[]` metadata.
+## Data
+
+All data is local, in the app data dir:
+- `settings.json` — Gemini API key, GitHub token, prompts, browse-mode
+  opt-in, tool-turn budget (plugin-store; plaintext, never bundled or
+  committed).
+- `library.json` — source records (videos, links, repos).
+- `bookmarks.json` / tab state — browse-mode link tree and sessions.
+- `spend.json` — estimated Gemini spend.
 - `<appDataDir>/videos/<id>.<ext>` — the video files themselves.
 
-Notes:
-- The API key is entered in Settings and persisted via `plugin-store`
-  (plaintext, in the app data dir). It is never bundled or committed.
+Media is uploaded to the Gemini File API only when you summarize, and the
+app re-uploads automatically if the remote file expired (~48h).
 
+## Releasing
 
-- The browser dev server (`npm run dev`) renders the UI but cannot call the Tauri
-  plugins (dialog/fs/store) — use `npm run tauri dev` for full functionality.
+Releases are cut by CI: push a `vX.Y.Z` tag and GitHub Actions builds,
+signs (macOS Developer ID + notarization; Windows DigiCert KeyLocker EV),
+and publishes both platforms plus the auto-updater manifest in one GitHub
+release.
 
-## Build a DMG
-
-```bash
-cd app
-npm run tauri build
-```
-
-The `.dmg` lands in `app/src-tauri/target/release/bundle/dmg/`.
-
-## Releasing (signed auto-update builds)
-
-Clarity ships **in-app auto-update** (Tauri updater). Cutting a release is more
-than `tauri build` — each release must include a signed updater artifact and a
-`latest.json` manifest so installed copies can update themselves.
-
-See **[`docs/releasing.md`](docs/releasing.md)** for the exact, step-by-step
-process (version bump → signed build → manifest → GitHub release).
-
+See **[`docs/releasing.md`](docs/releasing.md)** for the checklist
+(unsigned Windows vet → version bump → release notes → tag).
 
 ## Stack / decisions
 
-- **D1 Svelte**, **D2 Gemini call in frontend JS** (`@google/genai`),
-  **D3 plugin-store plaintext key** — all per the spec's recommendations.
-- Model: `gemini-2.5-flash` (see `app/src/lib/gemini.ts`).
+- Svelte 5 (runes) + SvelteKit, Tauri v2.
+- Gemini calls from frontend JS (`@google/genai`); model
+  `gemini-2.5-flash` (see `app/src/lib/gemini.ts`).
+- plugin-store for all persisted state; native child webviews (wry) for
+  browse tabs and the research view.

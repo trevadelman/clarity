@@ -1,13 +1,13 @@
 # Windows Release Readiness — `webview-poc`
 
-**This doc is the release gate for merging `webview-poc` to main and
-tagging the next version.** Every blocker below must be resolved (or
-explicitly accepted as a degraded ship) and verified on a real Windows
-machine before signing anything.
+> **Status: gate passed — shipped in v2.0.0.** All blockers below were
+> resolved and verified on a real Windows machine (EC2 smoke test of the
+> unsigned installer) before tagging. Kept as a historical record.
 
 The branch compiles and runs on Windows (all objc2 deps are
-macos-cfg-scoped), but a Windows build produced from it today would be
-silently degraded: CI would build and sign it without any failure signal.
+macos-cfg-scoped), but a Windows build produced from it at the time of
+writing would have been silently degraded: CI would build and sign it
+without any failure signal.
 
 ## Test loop (no signatures consumed)
 
@@ -30,11 +30,11 @@ expected; click through. This workflow never touches releases,
 
 | # | Blocker | Status |
 |---|---------|--------|
-| 1 | `eval_in_tab` WebView2 twin | ◐ implemented, needs EC2 verification |
+| 1 | `eval_in_tab` WebView2 twin | ✅ verified on EC2 |
 | 2 | Windows titlebar | ✅ resolved — mac Overlay chrome, native on Windows |
-| 3 | First-request UA on WebView2 | ◐ hardened via SetUserAgent, needs EC2 verification |
-| 4 | Full Windows smoke test | ☐ not run |
-| 5 | OAuth / popup-window handling | ◐ implemented, needs mac + EC2 verification |
+| 3 | First-request UA on WebView2 | ✅ verified on EC2 |
+| 4 | Full Windows smoke test | ✅ passed on EC2 |
+| 5 | OAuth / popup-window handling | ✅ verified on mac + EC2 |
 
 ### 1. `eval_in_tab` WebView2 twin — the big one
 

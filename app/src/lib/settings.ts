@@ -1,4 +1,5 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { writable } from "svelte/store";
 import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "./gemini";
 
 const STORE_FILE = "settings.json";
@@ -7,6 +8,7 @@ const KEY_PROMPT = "summaryPrompt";
 const KEY_DIAGRAM_PROMPT = "diagramPrompt";
 const KEY_GITHUB_TOKEN = "githubToken";
 const KEY_MAX_TOOL_TURNS = "maxToolTurns";
+const KEY_BROWSE_ENABLED = "browseEnabled";
 
 /** Default research-turn budget for the agentic repo chat. */
 export const DEFAULT_MAX_TOOL_TURNS = 15;
@@ -49,6 +51,25 @@ export async function savePrompt(prompt: string): Promise<void> {
   const store = await getStore();
   await store.set(KEY_PROMPT, prompt);
   await store.save();
+}
+
+/**
+ * Whether Browse mode is enabled (opt-in beta). Reactive mirror of the
+ * persisted setting so the sidebar mode toggle appears/disappears live.
+ * Hydrated once at startup by `initBrowseEnabled`.
+ */
+export const browseEnabled = writable(false);
+
+export async function initBrowseEnabled(): Promise<void> {
+  const store = await getStore();
+  browseEnabled.set((await store.get<boolean>(KEY_BROWSE_ENABLED)) ?? false);
+}
+
+export async function saveBrowseEnabled(enabled: boolean): Promise<void> {
+  const store = await getStore();
+  await store.set(KEY_BROWSE_ENABLED, enabled);
+  await store.save();
+  browseEnabled.set(enabled);
 }
 
 export async function loadMaxToolTurns(): Promise<number> {

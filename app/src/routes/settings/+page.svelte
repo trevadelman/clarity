@@ -1,18 +1,32 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { getVersion } from "@tauri-apps/api/app";
-  import { KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw, GitBranch, Info, DollarSign, Trash2, Wrench, Globe } from "lucide-svelte";
+  import {
+    KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw,
+    GitBranch, DollarSign, Trash2, Wrench, Globe, Settings2,
+    Sparkles, Link2, ChevronDown,
+  } from "lucide-svelte";
   import { invoke } from "@tauri-apps/api/core";
   import {
     loadApiKey, saveApiKey, loadPrompt, savePrompt,
     loadDiagramPrompt, saveDiagramPrompt,
     loadGitHubToken, saveGitHubToken,
     loadMaxToolTurns, saveMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
+    browseEnabled, saveBrowseEnabled,
   } from "$lib/settings";
   import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "$lib/gemini";
   import { loadSpend, resetSpend, type SpendInfo } from "$lib/spend";
   import { checkForUpdate, installUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
+
+  type Tab = "general" | "ai" | "connections" | "browser";
+  const tabs: { id: Tab; label: string; icon: typeof Settings2 }[] = [
+    { id: "general", label: "General", icon: Settings2 },
+    { id: "ai", label: "AI", icon: Sparkles },
+    { id: "connections", label: "Connections", icon: Link2 },
+    { id: "browser", label: "Browser", icon: Globe },
+  ];
+  let activeTab = $state<Tab>("general");
 
   let apiKey = $state("");
   let githubToken = $state("");
@@ -20,11 +34,12 @@
   let diagramPrompt = $state(DEFAULT_DIAGRAM_PROMPT);
   let version = $state("");
   let checking = $state(false);
-  let tokenHelpOpen = $state(false);
   let spend = $state<SpendInfo>({ totalUsd: 0, since: null });
   let maxToolTurns = $state(DEFAULT_MAX_TOOL_TURNS);
   let confirmClear = $state(false);
   let clearing = $state(false);
+  let summaryPromptOpen = $state(true);
+  let diagramPromptOpen = $state(true);
 
   onMount(async () => {
     apiKey = await loadApiKey();
@@ -86,6 +101,11 @@
     prompt = DEFAULT_PROMPT;
     toast.info("Prompt reset to default (not yet saved).");
   }
+  async function handleToggleBrowse() {
+    const enabled = !$browseEnabled;
+    await saveBrowseEnabled(enabled);
+    toast.success(enabled ? "Browse mode enabled." : "Browse mode disabled.");
+  }
   async function handleClearBrowsingData() {
     if (!confirmClear) {
       confirmClear = true;
@@ -115,64 +135,128 @@
 <header class="page-head">
   <div>
     <h1>Settings</h1>
-    <p class="sub">Configure your Gemini connection and summary behavior.</p>
   </div>
 </header>
 
-<section class="card">
-  <div class="card-head">
-    <KeyRound size={17} /><h2>Gemini</h2>
-    <span class="spend-inline mono" title={spend.since ? `Since ${new Date(spend.since).toLocaleDateString()}` : ""}>
-      <DollarSign size={13} /> {fmtSpend(spend.totalUsd)} spent
-    </span>
+<div class="tab-bar" role="tablist">
+  {#each tabs as t (t.id)}
+    {@const Icon = t.icon}
     <button
-      class="spend-reset"
-      onclick={handleResetSpend}
-      disabled={spend.totalUsd === 0}
-      title="Reset spend tracker"
-      aria-label="Reset spend tracker"
+      class="tab"
+      class:on={activeTab === t.id}
+      role="tab"
+      aria-selected={activeTab === t.id}
+      onclick={() => (activeTab = t.id)}
     >
-      <Trash2 size={13} />
+      <Icon size={15} /> {t.label}
     </button>
-  </div>
-  <div class="row">
-    <input
-      type="password"
-      placeholder="Paste your Gemini API key"
-      bind:value={apiKey}
-    />
-    <button class="btn primary" onclick={handleSaveKey} disabled={!apiKey.trim()}>
-      <Save size={15} /> Save
-    </button>
-  </div>
-  <p class="hint">Stored locally via plugin-store. Never bundled or committed.</p>
-  <div class="row sub-row">
-    <span class="sub-label"><Wrench size={14} /> Repo chat tool limit</span>
-    <input class="num" type="number" min="1" max="25" bind:value={maxToolTurns} />
-    <button class="btn" onclick={handleSaveMaxToolTurns}><Save size={14} /> Save</button>
-  </div>
-  <p class="hint">
-    Max research rounds (file reads, diffs, searches) per repo-chat question.
-    Higher digs deeper but costs more. Default {DEFAULT_MAX_TOOL_TURNS}. The
-    spend total above tracks all estimated Gemini costs — even for replaced or
-    deleted work.
-  </p>
-</section>
+  {/each}
+</div>
 
-<section class="card">
-  <div class="card-head">
-    <GitBranch size={17} /><h2>GitHub Token</h2>
-    <button
-      class="info-btn"
-      onclick={() => (tokenHelpOpen = !tokenHelpOpen)}
-      aria-expanded={tokenHelpOpen}
-      aria-label="How to get a GitHub token"
-    >
-      <Info size={15} />
+{#if activeTab === "general"}
+  <section class="card">
+    <div class="card-head"><RefreshCw size={17} /><h2>About &amp; Updates</h2></div>
+    <div class="row">
+      <span class="version">Clarity{version ? ` v${version}` : ""}</span>
+      <button class="btn" onclick={handleCheckUpdates} disabled={checking}>
+        <RefreshCw size={14} /> {checking ? "Checking…" : "Check for updates"}
+      </button>
+    </div>
+    <p class="hint">Checks GitHub for new signed releases. If one is found, it's downloaded, verified, installed, and the app restarts automatically.</p>
+  </section>
+{/if}
+
+{#if activeTab === "ai"}
+  <section class="card">
+    <div class="card-head">
+      <KeyRound size={17} /><h2>Gemini API Key</h2>
+      <span class="spend-inline mono" title={spend.since ? `Since ${new Date(spend.since).toLocaleDateString()}` : ""}>
+        <DollarSign size={13} /> {fmtSpend(spend.totalUsd)} spent
+      </span>
+      <button
+        class="spend-reset"
+        onclick={handleResetSpend}
+        disabled={spend.totalUsd === 0}
+        title="Reset spend tracker"
+        aria-label="Reset spend tracker"
+      >
+        <Trash2 size={13} />
+      </button>
+    </div>
+    <div class="row">
+      <input
+        type="password"
+        placeholder="Paste your Gemini API key"
+        bind:value={apiKey}
+      />
+      <button class="btn primary" onclick={handleSaveKey} disabled={!apiKey.trim()}>
+        <Save size={15} /> Save
+      </button>
+    </div>
+    <p class="hint">Stored locally via plugin-store. Never bundled or committed.</p>
+    <div class="row sub-row">
+      <span class="sub-label"><Wrench size={14} /> Repo chat tool limit</span>
+      <input class="num" type="number" min="1" max="25" bind:value={maxToolTurns} />
+      <button class="btn" onclick={handleSaveMaxToolTurns}><Save size={14} /> Save</button>
+    </div>
+    <p class="hint">
+      Max research rounds (file reads, diffs, searches) per repo-chat question.
+      Higher digs deeper but costs more. Default {DEFAULT_MAX_TOOL_TURNS}. The
+      spend total above tracks all estimated Gemini costs — even for replaced or
+      deleted work.
+    </p>
+  </section>
+
+  <section class="card">
+    <button class="collapse-head" onclick={() => (summaryPromptOpen = !summaryPromptOpen)} aria-expanded={summaryPromptOpen}>
+      <MessageSquareText size={17} /><h2>Default Summary Prompt</h2>
+      <span class="chev" class:open={summaryPromptOpen}><ChevronDown size={16} /></span>
     </button>
-  </div>
-  {#if tokenHelpOpen}
-    <div class="info-pop">
+    {#if summaryPromptOpen}
+      <textarea rows="7" bind:value={prompt}></textarea>
+      <div class="row end">
+        <button class="btn" onclick={handleReset}><RotateCcw size={14} /> Reset</button>
+        <button class="btn primary" onclick={handleSavePrompt}><Save size={15} /> Save prompt</button>
+      </div>
+    {/if}
+  </section>
+
+  <section class="card">
+    <button class="collapse-head" onclick={() => (diagramPromptOpen = !diagramPromptOpen)} aria-expanded={diagramPromptOpen}>
+      <ImageIcon size={17} /><h2>Diagram Prompt</h2>
+      <span class="chev" class:open={diagramPromptOpen}><ChevronDown size={16} /></span>
+    </button>
+    {#if diagramPromptOpen}
+      <textarea rows="9" bind:value={diagramPrompt}></textarea>
+      <div class="row end">
+        <button class="btn" onclick={handleResetDiagramPrompt}><RotateCcw size={14} /> Reset</button>
+        <button class="btn primary" onclick={handleSaveDiagramPrompt}><Save size={15} /> Save prompt</button>
+      </div>
+      <p class="hint">Controls the conceptual learning diagram. Designed to avoid recreating screenshots or OS chrome (docks, menu bars) — those belong in Highlights. The model may still reference the video to match a demonstrated UI component's aesthetic.</p>
+    {/if}
+  </section>
+{/if}
+
+{#if activeTab === "connections"}
+  <section class="card">
+    <div class="card-head">
+      <GitBranch size={17} /><h2>GitHub Token</h2>
+    </div>
+    <div class="row">
+      <input
+        type="password"
+        placeholder="Personal access token (optional)"
+        bind:value={githubToken}
+      />
+      <button class="btn primary" onclick={handleSaveGitHubToken}>
+        <Save size={15} /> Save
+      </button>
+    </div>
+    <p class="hint">
+      Optional for public repos; required for private repos and higher rate
+      limits. A fine-grained token with read-only Contents access is enough.
+    </p>
+    <div class="info-pop token-help">
       <p><strong>Two ways to get a token:</strong></p>
       <p>
         <strong>1. GitHub CLI (fastest).</strong> If you use <code>gh</code>, run
@@ -186,81 +270,79 @@
         grant read-only <em>Contents</em> and <em>Metadata</em> permissions.
       </p>
     </div>
-  {/if}
-  <div class="row">
-    <input
-      type="password"
-      placeholder="Personal access token (optional)"
-      bind:value={githubToken}
-    />
-    <button class="btn primary" onclick={handleSaveGitHubToken}>
-      <Save size={15} /> Save
-    </button>
-  </div>
-  <p class="hint">
-    Optional for public repos; required for private repos and higher rate
-    limits. A fine-grained token with read-only Contents access is enough.
-  </p>
-</section>
+  </section>
+{/if}
 
-<section class="card">
-  <div class="card-head"><MessageSquareText size={17} /><h2>Default Summary Prompt</h2></div>
-  <textarea rows="7" bind:value={prompt}></textarea>
-  <div class="row end">
-    <button class="btn" onclick={handleReset}><RotateCcw size={14} /> Reset</button>
-    <button class="btn primary" onclick={handleSavePrompt}><Save size={15} /> Save prompt</button>
-  </div>
-</section>
+{#if activeTab === "browser"}
+  <section class="card">
+    <div class="card-head"><Globe size={17} /><h2>Browse Mode</h2></div>
+    <div class="row">
+      <span class="version">Browse mode (beta)</span>
+      <button class="btn" class:primary={!$browseEnabled} onclick={handleToggleBrowse}>
+        {$browseEnabled ? "Disable" : "Enable"}
+      </button>
+    </div>
+    <p class="hint">
+      Adds a Browse mode to the sidebar: a curated link tree with persistent,
+      signed-in browser tabs and an AI that can read the page you're on.
+      Opt-in while in beta — disabling it hides the feature without deleting
+      your links or sessions.
+    </p>
+  </section>
 
-<section class="card">
-  <div class="card-head"><ImageIcon size={17} /><h2>Diagram Prompt</h2></div>
-  <textarea rows="9" bind:value={diagramPrompt}></textarea>
-  <div class="row end">
-    <button class="btn" onclick={handleResetDiagramPrompt}><RotateCcw size={14} /> Reset</button>
-    <button class="btn primary" onclick={handleSaveDiagramPrompt}><Save size={15} /> Save prompt</button>
-  </div>
-  <p class="hint">Controls the conceptual learning diagram. Designed to avoid recreating screenshots or OS chrome (docks, menu bars) — those belong in Highlights. The model may still reference the video to match a demonstrated UI component's aesthetic.</p>
-</section>
-
-<section class="card">
-  <div class="card-head"><Globe size={17} /><h2>Browser</h2></div>
-  <div class="row">
-    <span class="version">Browse-mode sessions &amp; site data</span>
-    <button class="btn" onclick={() => invoke("open_devtools")} title="Open the developer console for debugging">
-      <Wrench size={14} /> Open console
-    </button>
-    {#if confirmClear}
-      <button class="btn" onclick={() => (confirmClear = false)}>Cancel</button>
-    {/if}
-    <button class="btn danger" onclick={handleClearBrowsingData} disabled={clearing}>
-      <Trash2 size={14} />
-      {clearing ? "Clearing…" : confirmClear ? "Confirm clear" : "Clear browsing data"}
-    </button>
-  </div>
-  <p class="hint">
-    Signs you out of every site by deleting cookies, site storage, and caches
-    used by browse tabs and the research view. Open tabs reload from scratch.
-    App settings, your library, and API keys are not affected.
-  </p>
-</section>
-
-<section class="card">
-  <div class="card-head"><RefreshCw size={17} /><h2>About &amp; Updates</h2></div>
-  <div class="row">
-    <span class="version">Clarity{version ? ` v${version}` : ""}</span>
-    <button class="btn" onclick={handleCheckUpdates} disabled={checking}>
-      <RefreshCw size={14} /> {checking ? "Checking…" : "Check for updates"}
-    </button>
-  </div>
-  <p class="hint">Checks GitHub for new signed releases. If one is found, it's downloaded, verified, installed, and the app restarts automatically.</p>
-</section>
+  <section class="card">
+    <div class="card-head"><Trash2 size={17} /><h2>Sessions &amp; Site Data</h2></div>
+    <div class="row">
+      <span class="version">Browse-mode sessions &amp; site data</span>
+      <button class="btn" onclick={() => invoke("open_devtools")} title="Open the developer console for debugging">
+        <Wrench size={14} /> Open console
+      </button>
+      {#if confirmClear}
+        <button class="btn" onclick={() => (confirmClear = false)}>Cancel</button>
+      {/if}
+      <button class="btn danger" onclick={handleClearBrowsingData} disabled={clearing}>
+        <Trash2 size={14} />
+        {clearing ? "Clearing…" : confirmClear ? "Confirm clear" : "Clear browsing data"}
+      </button>
+    </div>
+    <p class="hint">
+      Signs you out of every site by deleting cookies, site storage, and caches
+      used by browse tabs and the research view. Open tabs reload from scratch.
+      App settings, your library, and API keys are not affected.
+    </p>
+  </section>
+{/if}
 
 <style>
 
-  .page-head { margin-bottom: 1.25rem; }
+  .page-head { margin-bottom: 1rem; }
   h1 { font-size: 1.5rem; margin: 0; letter-spacing: -0.01em; }
   h2 { font-size: 1rem; margin: 0; }
-  .sub { color: var(--text-dim); font-size: 0.9rem; margin: 0.2rem 0 0; }
+
+  .tab-bar {
+    display: flex;
+    gap: 0.35rem;
+    margin-bottom: 1.1rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0;
+  }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: none;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0.55rem 0.85rem;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s, border-color 0.15s;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.on { color: var(--accent); border-bottom-color: var(--accent); }
 
   .card {
     background: var(--surface);
@@ -272,6 +354,25 @@
   }
   .card-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.8rem; }
   .card-head :global(svg) { color: var(--accent); }
+
+  .collapse-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-family: inherit;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+  }
+  .collapse-head :global(svg) { color: var(--accent); }
+  .collapse-head + textarea { margin-top: 0.8rem; }
+  .chev { margin-left: auto; display: inline-flex; transition: transform 0.15s; }
+  .chev.open { transform: rotate(180deg); }
+  .chev :global(svg) { color: var(--text-dim); }
 
   .row { display: flex; align-items: center; gap: 0.6rem; }
   .row.end { justify-content: flex-end; margin-top: 0.8rem; }
@@ -316,21 +417,6 @@
 
   .hint { font-size: 0.82rem; color: var(--text-dim); margin: 0.6rem 0 0; }
 
-  .info-btn {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border: none;
-    border-radius: 999px;
-    background: transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-  }
-  .info-btn:hover, .info-btn[aria-expanded="true"] {
-    background: color-mix(in srgb, var(--accent) 14%, transparent);
-    color: var(--accent);
-  }
   .info-pop {
     border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
     background: color-mix(in srgb, var(--accent) 5%, var(--bg));
@@ -352,6 +438,7 @@
     font-family: "JetBrains Mono", monospace;
   }
   .info-pop a { color: var(--accent); }
+  .token-help { margin-top: 0.8rem; margin-bottom: 0; }
   .version { font-size: 0.92rem; font-weight: 500; flex: 1; }
 
   input.num { flex: 0 0 80px; width: 80px; }

@@ -14,6 +14,7 @@
   import Toaster from "$lib/Toaster.svelte";
   import LinkTree from "$lib/LinkTree.svelte";
   import { chatDocked } from "$lib/chatDock";
+  import { browseEnabled, initBrowseEnabled } from "$lib/settings";
 
   let { children } = $props();
 
@@ -63,6 +64,12 @@
     if ($chatDocked && !collapsed) collapsed = true;
   });
 
+  // Browse mode is opt-in (Settings → Browser). If it gets disabled while
+  // the user is in browse mode, snap back to the library.
+  $effect(() => {
+    if (!$browseEnabled && mode === "browse") setMode("library");
+  });
+
   function setMode(m: "library" | "browse") {
     mode = m;
     localStorage.setItem(MODE_KEY, m);
@@ -97,6 +104,7 @@
 
   onMount(async () => {
     initTheme();
+    await initBrowseEnabled();
     version = await getVersion();
     const info = await checkForUpdate();
     if (info && !(await isVersionDismissed(info.version))) update = info;
@@ -142,6 +150,7 @@
       <span class="brand-text"><strong>Clarity</strong><br />Make It Make Sense</span>
     </a>
 
+    {#if $browseEnabled}
     <div class="mode-cards">
       <button
         class="mode-card"
@@ -160,6 +169,7 @@
         <Globe size={15} /> <span class="mode-label">Browse</span>
       </button>
     </div>
+    {/if}
 
     {#if mode === "library"}
       <div class="links">

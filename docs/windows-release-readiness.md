@@ -34,7 +34,7 @@ expected; click through. This workflow never touches releases,
 | 2 | Windows titlebar | ✅ resolved — mac Overlay chrome, native on Windows |
 | 3 | First-request UA on WebView2 | ◐ hardened via SetUserAgent, needs EC2 verification |
 | 4 | Full Windows smoke test | ☐ not run |
-| 5 | OAuth / popup-window handling | ☐ not started (**mandatory** pre-release) |
+| 5 | OAuth / popup-window handling | ◐ implemented, needs mac + EC2 verification |
 
 ### 1. `eval_in_tab` WebView2 twin — the big one
 
@@ -88,16 +88,16 @@ under the native titlebar at 100%/125%/150% DPI.
 
 ### 5. OAuth / popup-window handling — mandatory pre-release
 
-Sites that authenticate via a popup window (`window.open` — Google, GitHub
-"Sign in with Google", Microsoft, etc.) are not handled in the browse/research
-webviews on **either** platform. An uncaptured `window.open()` in a child
-webview is silently swallowed or spawns an untracked native popup, so those
-logins can't complete.
+Implemented in `add_browser_webview` via `on_new_window`: http(s)
+`window.open` requests from browse/research webviews open a real decorated
+popup window (`NewWindowResponse::Create`) that shares the opener's web
+context — `with_webview_configuration` on macOS, `with_environment` on
+Windows — so `window.opener`/postMessage plumbing works and the popup can
+close itself when the OAuth flow completes. Non-http(s) schemes are denied.
+Popups are transient (`popup-<n>` labels, untracked, no IPC capabilities).
 
-This is a missing feature (not a platform bug) and is a hard blocker for
-shipping Browse mode. Design one OS-agnostic approach via wry's new-window
-hook (open the requested URL as another managed tab, or force a
-redirect-based flow), then test it on Windows **and** locally on macOS.
+Verify with a "Sign in with Google"-style flow on macOS locally, then on
+the EC2 box.
 
 ## Test log
 

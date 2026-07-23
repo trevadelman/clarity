@@ -1,6 +1,7 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use tauri::webview::WebviewBuilder;
+use tauri::webview::{NewWindowResponse, WebviewBuilder};
 use tauri::{LogicalPosition, LogicalSize, Manager, State, WebviewUrl, Window};
 
 /// Label of the single child webview used for the live research view.
@@ -32,6 +33,13 @@ struct TabState {
 /// Webview label for a browse tab id.
 fn tab_label(id: &str) -> String {
     format!("tab-{id}")
+}
+
+/// Unique label for each popup window (labels must never repeat within a
+/// session, even after a popup closes).
+fn next_popup_label() -> String {
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    format!("popup-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Parse a `#rrggbb` hex color (as sent by the frontend theme) into a
@@ -70,6 +78,44 @@ fn add_browser_webview(
     if let Some(color) = bg.and_then(parse_hex_color) {
         builder = builder.background_color(color);
     }
+    // OAuth popups: sites authenticate via window.open (Google, Microsoft,
+    // GitHub social login...). Open those as real decorated windows that
+    // share the opener's web context so window.opener/postMessage plumbing
+    // works and the popup can close itself when the flow completes.
+    let app = window.app_handle().clone();
+    builder = builder.on_new_window(move |url, features| {
+        if !matches!(url.scheme(), "https" | "http") {
+            return NewWindowResponse::Deny;
+        }
+        let size = features
+            .size()
+            .unwrap_or(LogicalSize::new(480.0, 640.0));
+        #[allow(unused_mut)]
+        let mut wb = tauri::WebviewWindowBuilder::new(
+            &app,
+            next_popup_label(),
+            WebviewUrl::External(url),
+        )
+        .title("Sign in")
+        .inner_size(size.width, size.height)
+        .user_agent(BROWSER_UA);
+        // Each platform requires the popup to share the opener's web context.
+        #[cfg(target_os = "macos")]
+        {
+            wb = wb.with_webview_configuration(features.opener().target_configuration.clone());
+        }
+        #[cfg(windows)]
+        {
+            wb = wb.with_environment(features.opener().environment.clone());
+        }
+        match wb.build() {
+            Ok(window) => NewWindowResponse::Create { window },
+            Err(e) => {
+                eprintln!("failed to open popup window: {e}");
+                NewWindowResponse::Deny
+            }
+        }
+    });
     let webview = window
         .add_child(
             builder,

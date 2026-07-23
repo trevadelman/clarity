@@ -30,27 +30,25 @@ expected; click through. This workflow never touches releases,
 
 | # | Blocker | Status |
 |---|---------|--------|
-| 1 | `eval_in_tab` WebView2 twin | ☐ not started |
+| 1 | `eval_in_tab` WebView2 twin | ◐ implemented, needs EC2 verification |
 | 2 | Windows titlebar | ✅ resolved — mac Overlay chrome, native on Windows |
-| 3 | First-request UA on WebView2 | ☐ unverified |
+| 3 | First-request UA on WebView2 | ◐ hardened via SetUserAgent, needs EC2 verification |
 | 4 | Full Windows smoke test | ☐ not run |
 | 5 | OAuth / popup-window handling | ☐ not started (**mandatory** pre-release) |
 
 ### 1. `eval_in_tab` WebView2 twin — the big one
 
-Everything "Ask AI about this page" (all page tools, `navigate_to`'s
-readiness poll) currently errors politely on Windows: the
-`#[cfg(not(target_os = "macos"))]` branch in `lib.rs` returns
-"Page extraction is not implemented on this platform yet."
+Implemented: `eval_in_tab` now has a `#[cfg(windows)]` branch using
+`with_webview` → `ICoreWebView2::ExecuteScript` with a completion handler
+(`webview2-com`, same version as wry's tree). ExecuteScript returns the JS
+value JSON-encoded, so the result is decoded back to the plain string the
+WKWebView path returns (`decode_execute_script_result`). Same mpsc +
+`spawn_blocking` + 10s timeout structure as macOS. Linux keeps the polite
+"not implemented" error.
 
-Implement via `with_webview` → `ICoreWebView2::ExecuteScript` (the
-completion handler returns the JSON result — same shape as the WKWebView
-path; use the `webview2-com` crate wry already depends on). Write and
-test this on a Windows machine, not blind.
-
-Alternative if it slips: gate the "Ask AI" UI behind a platform check so
-Windows users see a clear "not available on Windows yet" state instead
-of tool errors mid-chat.
+Written blind on macOS — the unsigned CI build is the compile gate, and
+the page tools ("Ask AI about this page") must be exercised on the EC2
+box before this is checked off.
 
 ### 2. Titlebar — ✅ resolved
 
@@ -74,10 +72,11 @@ measure (all report content == frame under the hood).
 
 ### 3. First-request UA on WebView2
 
-Builder `.user_agent()` is *believed* applied before the first request on
-Windows (the about:blank bootstrap only exists for the macOS race).
-Verify with a UA-echo site; if it races too, the fix is
-`ICoreWebView2Settings2::PutUserAgent` before navigate.
+Hardened: `add_browser_webview` now also sets the UA natively on Windows
+(`ICoreWebView2Settings2::SetUserAgent`) between webview creation at
+about:blank and the first real navigation — the same belt-and-suspenders
+the macOS path uses. Verify on EC2 with a UA-echo site (should report the
+Edge UA).
 
 ### 4. Full Windows smoke test
 

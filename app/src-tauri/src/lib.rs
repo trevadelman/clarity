@@ -88,6 +88,27 @@ fn add_browser_webview(
         })
         .map_err(|e| e.to_string())?;
 
+    // Same belt-and-suspenders on Windows: set the UA on the WebView2
+    // settings before the first real navigation, in case the builder
+    // option races it like WKWebView's does.
+    #[cfg(windows)]
+    webview
+        .with_webview(|platform| {
+            use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings2;
+            use windows::core::{Interface, HSTRING, PCWSTR};
+
+            let apply = || -> windows::core::Result<()> {
+                let core = unsafe { platform.controller().CoreWebView2() }?;
+                let settings: ICoreWebView2Settings2 = unsafe { core.Settings() }?.cast()?;
+                let ua = HSTRING::from(BROWSER_UA);
+                unsafe { settings.SetUserAgent(PCWSTR(ua.as_ptr())) }
+            };
+            if let Err(e) = apply() {
+                eprintln!("failed to set WebView2 user agent: {e}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
+
     webview.navigate(url).map_err(|e| e.to_string())
 }
 
@@ -399,10 +420,67 @@ async fn eval_in_tab(window: Window, id: String, js: String) -> Result<String, S
         .map_err(|e| e.to_string())?
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel::<Result<String, String>>();
+        webview
+            .with_webview(move |platform| {
+                use webview2_com::ExecuteScriptCompletedHandler;
+                use windows::core::{HSTRING, PCWSTR};
+
+                let core = match unsafe { platform.controller().CoreWebView2() } {
+                    Ok(core) => core,
+                    Err(e) => {
+                        let _ = tx.send(Err(e.to_string()));
+                        return;
+                    }
+                };
+                let handler_tx = tx.clone();
+                let handler = ExecuteScriptCompletedHandler::create(Box::new(
+                    move |error_code, result_json: String| {
+                        let out = match error_code {
+                            Ok(()) => decode_execute_script_result(&result_json),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        let _ = handler_tx.send(out);
+                        Ok(())
+                    },
+                ));
+                let js = HSTRING::from(js);
+                if let Err(e) = unsafe { core.ExecuteScript(PCWSTR(js.as_ptr()), &handler) } {
+                    let _ = tx.send(Err(e.to_string()));
+                }
+            })
+            .map_err(|e| e.to_string())?;
+
+        // The completion handler fires on the main thread; wait for it on a
+        // blocking-friendly thread so we don't stall the async runtime.
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(Duration::from_secs(10))
+                .map_err(|_| "Timed out reading from the page.".to_string())?
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         let _ = js;
         Err("Page extraction is not implemented on this platform yet.".into())
+    }
+}
+
+/// ExecuteScript returns the JS value JSON-encoded; our contract (matching
+/// the WKWebView path) is the plain string the page script evaluated to.
+#[cfg(windows)]
+fn decode_execute_script_result(raw: &str) -> Result<String, String> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::String(s)) => Ok(s),
+        Ok(serde_json::Value::Null) => Ok(String::new()),
+        _ => Err("Page script did not return a string.".into()),
     }
 }
 

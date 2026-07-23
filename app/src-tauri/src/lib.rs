@@ -170,6 +170,51 @@ fn add_browser_webview(
     out
 }
 
+/// Create a browser child webview on the main thread and wait for the
+/// result. On Windows, WebView2 controller creation completes via a
+/// callback that must be delivered on the UI thread — calling `add_child`
+/// from a command worker thread deadlocks the whole app (`wait_with_pump`
+/// spins forever). macOS doesn't strictly need the hop but shares the one
+/// code path.
+async fn add_browser_webview_on_main(
+    window: Window,
+    label: String,
+    url: tauri::Url,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    bg: Option<String>,
+) -> Result<(), String> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (tx, rx) = mpsc::channel::<Result<(), String>>();
+    let win = window.clone();
+    window
+        .app_handle()
+        .run_on_main_thread(move || {
+            let _ = tx.send(add_browser_webview(
+                &win,
+                &label,
+                url,
+                x,
+                y,
+                width,
+                height,
+                bg.as_deref(),
+            ));
+        })
+        .map_err(|e| e.to_string())?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        rx.recv_timeout(Duration::from_secs(15))
+            .map_err(|_| "Timed out creating the browser view.".to_string())?
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Browse tabs may load any http(s) page; everything else is rejected
 /// (file:, data:, javascript:, ...).
 fn parse_http_url(url: &str) -> Result<tauri::Url, String> {
@@ -194,7 +239,7 @@ fn parse_github_url(url: &str) -> Result<tauri::Url, String> {
 
 /// Open (or re-target) the research child webview at the given logical rect.
 #[tauri::command]
-fn open_research_view(
+async fn open_research_view(
     window: Window,
     url: String,
     x: f64,
@@ -216,7 +261,8 @@ fn open_research_view(
         return Ok(());
     }
 
-    add_browser_webview(&window, RESEARCH_LABEL, parsed, x, y, width, height, None)
+    add_browser_webview_on_main(window, RESEARCH_LABEL.into(), parsed, x, y, width, height, None)
+        .await
 }
 
 /// Navigate the existing research webview to a new GitHub URL.
@@ -289,9 +335,9 @@ fn hide_other_tabs(window: &Window, keep: Option<&str>) {
 /// it (preserving its loaded state). Hides all other tabs and applies
 /// LRU eviction beyond the cap.
 #[tauri::command]
-fn open_tab(
+async fn open_tab(
     window: Window,
-    state: State<TabState>,
+    state: State<'_, TabState>,
     id: String,
     url: String,
     x: f64,
@@ -323,7 +369,7 @@ fn open_tab(
         return Ok(());
     }
 
-    add_browser_webview(&window, &label, parsed, x, y, width, height, bg.as_deref())
+    add_browser_webview_on_main(window, label, parsed, x, y, width, height, bg).await
 }
 
 /// Reposition/resize the visible tab webviews (logical pixels).

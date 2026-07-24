@@ -2,7 +2,10 @@
   import { fly, fade } from "svelte/transition";
   import { tick } from "svelte";
   import { marked } from "marked";
-  import { MessageCircle, X, Send, Trash2, Film, Search, ChevronDown } from "lucide-svelte";
+  import {
+    MessageCircle, X, Send, Trash2, Film, Search, ChevronDown,
+    FileText, Check,
+  } from "lucide-svelte";
   import { onDestroy } from "svelte";
   import { chatDocked } from "$lib/chatDock";
   import type { ChatMessage } from "$lib/gemini";
@@ -33,6 +36,27 @@
     showScrim?: boolean;
     /** Called when a [FILE:path] or [COMMIT:sha] citation chip is clicked. */
     onCitation?: (kind: "file" | "commit", value: string) => void;
+    /**
+     * Project mode: handles repo-qualified citations ([FILE:repo:path],
+     * [COMMIT:repo:sha]) and video-qualified timestamps ([TS:videoId:mm:ss]).
+     */
+    onProjectCite?: (
+      kind: "file" | "commit" | "ts",
+      scope: string,
+      value: string
+    ) => void;
+    /** Project mode: video id → display name for timestamp chip labels. */
+    projectVideoNames?: Record<string, string> | null;
+    /**
+     * Project mode: user approved a chat report proposal. Receives the
+     * message index (so the parent can persist the outcome) and the
+     * possibly-edited title/prompt.
+     */
+    onApproveReport?: (msgIndex: number, title: string, prompt: string) => Promise<void>;
+    /** Project mode: user dismissed a chat report proposal. */
+    onDismissReport?: (msgIndex: number) => void;
+    /** Project mode: open a generated report (from a proposal card). */
+    onOpenReport?: (reportId: string) => void;
     /** Whether the panel is expanded; bindable so parents can open it. */
     open?: boolean;
   }
@@ -44,10 +68,29 @@
     toolStatus = null,
     showScrim = true,
     onCitation,
+    onProjectCite,
+    projectVideoNames = null,
+    onApproveReport,
+    onDismissReport,
+    onOpenReport,
     open = $bindable(false),
   }: Props = $props();
   let question = $state("");
   let busy = $state(false);
+  /** Inline edits to a pending proposal's prompt, keyed by message index. */
+  let proposalDrafts = $state<Record<number, string>>({});
+  /** Message index of a proposal currently generating. */
+  let generatingProposal = $state<number | null>(null);
+
+  async function approveProposal(i: number, title: string, prompt: string) {
+    if (!onApproveReport || generatingProposal !== null) return;
+    generatingProposal = i;
+    try {
+      await onApproveReport(i, title, proposalDrafts[i] ?? prompt);
+    } finally {
+      generatingProposal = null;
+    }
+  }
   let scrollEl = $state<HTMLElement | null>(null);
   let openTrails = $state<Set<number>>(new Set());
 
@@ -103,10 +146,25 @@
   // final ] to close the citation.
   const FILE_RE = /\[FILE:\s*(\S+)\s*\]/g;
   const COMMIT_RE = /\[COMMIT:\s*([0-9a-f]{6,40})\s*\]/gi;
+  // Project-mode, scope-qualified forms. Repo names may contain owner/repo.
+  const P_TS_RE = /\[TS:\s*([\w-]+)\s*:\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*\]/g;
+  const P_FILE_RE = /\[FILE:\s*([^:\]\s]+)\s*:\s*(\S+)\s*\]/g;
+  const P_COMMIT_RE = /\[COMMIT:\s*([^:\]\s]+)\s*:\s*([0-9a-f]{6,40})\s*\]/gi;
 
   /** Convert citation + timestamp markers into clickable chips, then markdown. */
   function renderMessage(text: string): string {
     let out = text;
+    if (onProjectCite) {
+      out = out.replace(P_TS_RE, (_m, vid, ts) => {
+        const name = projectVideoNames?.[vid];
+        const label = name ? `${name} @ ${ts}` : ts;
+        return `<button class="ts-chip" data-p-kind="ts" data-p-scope="${vid}" data-p-value="${ts}">${label}</button>`;
+      });
+      out = out.replace(P_FILE_RE, (_m, repo, path) =>
+        `<button class="cite-chip" data-p-kind="file" data-p-scope="${repo}" data-p-value="${path}">${repo}: ${path}</button>`);
+      out = out.replace(P_COMMIT_RE, (_m, repo, sha) =>
+        `<button class="cite-chip" data-p-kind="commit" data-p-scope="${repo}" data-p-value="${sha}">${repo}: ${String(sha).slice(0, 7)}</button>`);
+    }
     if (videoNames) {
       out = out.replace(VIDEO_RE, (_m, vid, ts) => {
         const name = videoNames?.[vid];
@@ -133,6 +191,14 @@
 
   function handleBodyClick(e: MouseEvent) {
     const el = e.target as HTMLElement;
+    const pcite = el.closest("[data-p-kind]");
+    if (pcite) {
+      const kind = pcite.getAttribute("data-p-kind") as "file" | "commit" | "ts";
+      const scope = pcite.getAttribute("data-p-scope") ?? "";
+      const value = pcite.getAttribute("data-p-value") ?? "";
+      if (scope && value) onProjectCite?.(kind, scope, value);
+      return;
+    }
     const cite = el.closest(".cite-chip");
     if (cite) {
       const kind = cite.getAttribute("data-cite-kind") as "file" | "commit";
@@ -205,6 +271,50 @@
                 {/if}
               {/if}
               <div class="bubble model markdown">{@html renderMessage(m.text)}</div>
+              {#if m.reportProposal}
+                {@const p = m.reportProposal}
+                <div class="proposal" class:settled={p.status !== "pending"}>
+                  <div class="proposal-head">
+                    <FileText size={14} />
+                    <span class="proposal-title">{p.title}</span>
+                  </div>
+                  {#if p.status === "pending"}
+                    <textarea
+                      class="proposal-prompt"
+                      rows="4"
+                      value={proposalDrafts[i] ?? p.prompt}
+                      oninput={(e) => (proposalDrafts[i] = (e.target as HTMLTextAreaElement).value)}
+                      disabled={generatingProposal !== null}
+                    ></textarea>
+                    <div class="proposal-actions">
+                      <button
+                        class="proposal-btn primary"
+                        onclick={() => approveProposal(i, p.title, p.prompt)}
+                        disabled={generatingProposal !== null}
+                      >
+                        {#if generatingProposal === i}
+                          Generating…
+                        {:else}
+                          <Check size={13} /> Generate report
+                        {/if}
+                      </button>
+                      <button
+                        class="proposal-btn"
+                        onclick={() => onDismissReport?.(i)}
+                        disabled={generatingProposal !== null}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  {:else if p.status === "generated" && p.reportId}
+                    <button class="proposal-btn primary" onclick={() => onOpenReport?.(p.reportId!)}>
+                      <FileText size={13} /> Open report
+                    </button>
+                  {:else}
+                    <span class="proposal-dismissed">Dismissed</span>
+                  {/if}
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -396,6 +506,63 @@
     color: var(--text-dim);
     line-height: 1.6;
   }
+
+  .proposal {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    padding: 0.6rem 0.7rem;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+  }
+  .proposal.settled { border-color: var(--border); background: var(--bg); }
+  .proposal-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+  }
+  .proposal-head :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .proposal-title { overflow: hidden; text-overflow: ellipsis; }
+  .proposal-prompt {
+    width: 100%;
+    resize: vertical;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.78rem;
+    font-family: inherit;
+    line-height: 1.45;
+  }
+  .proposal-prompt:focus { outline: none; border-color: var(--accent); }
+  .proposal-actions { display: flex; gap: 0.4rem; }
+  .proposal-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 0.78rem;
+    font-family: inherit;
+    cursor: pointer;
+  }
+  .proposal-btn:hover:not(:disabled) { background: var(--hover); }
+  .proposal-btn:disabled { opacity: 0.55; cursor: not-allowed; }
+  .proposal-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    align-self: flex-start;
+  }
+  .proposal-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .proposal-dismissed { font-size: 0.76rem; color: var(--text-dim); font-style: italic; }
 
   .tool-status {
     font-size: 0.76rem;

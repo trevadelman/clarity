@@ -373,6 +373,16 @@ export async function generateDiagram(
   throw new Error("No diagram image returned from Gemini.");
 }
 
+/** A report the model has proposed mid-chat, awaiting user approval. */
+export interface ReportProposal {
+  title: string;
+  prompt: string;
+  /** Set once the user acts on the proposal. */
+  status?: "pending" | "generated" | "dismissed";
+  /** Report id once generated. */
+  reportId?: string;
+}
+
 /** One turn in a stored chat thread. */
 export interface ChatMessage {
   role: "user" | "model";
@@ -383,6 +393,8 @@ export interface ChatMessage {
   costUsd?: number;
   /** Research steps taken to produce this message (repo chats only). */
   toolCalls?: string[];
+  /** Report proposed via the propose_report tool (project chats only). */
+  reportProposal?: ReportProposal;
 }
 
 const CHAT_SYSTEM_PROMPT =
@@ -402,6 +414,8 @@ export interface ChatReply {
   usage: TokenUsage;
   /** Research steps taken (repo chats only). */
   toolCalls?: string[];
+  /** Report proposal captured during the turn (project chats only). */
+  reportProposal?: ReportProposal;
 }
 
 /**
@@ -658,6 +672,13 @@ export interface RepoChatDigest {
 /** Fallback research-turn budget when the caller doesn't pass one. */
 const DEFAULT_TOOL_TURNS = 15;
 
+/**
+ * Reports get a much higher research budget than chat: the writer needs
+ * the agency to walk many files/commits before drafting. High ceiling
+ * (rather than none) so a looping model can't burn unbounded spend.
+ */
+export const REPORT_MAX_TOOL_TURNS = 100;
+
 /** Everything one agentic chat run needs beyond the shared loop mechanics. */
 interface AgenticChatSpec {
   systemInstruction: string;
@@ -796,6 +817,222 @@ function describeToolCall(name: string, args: Record<string, unknown>): string {
     case "search_code": return `Searching code for “${args.query}”…`;
     default: return `Running ${name}…`;
   }
+}
+
+const PROJECT_CHAT_SYSTEM_PROMPT =
+  "You are a senior engineer working inside a PROJECT: a workspace over a " +
+  "chosen set of sources — GitHub repositories and videos (attached as " +
+  "media). Answer questions by combining them: watch the attached videos " +
+  "for what was said/shown, and use the live repo tools to read the actual " +
+  "code. Every repo tool takes a `repo` parameter naming which member " +
+  "repository to act on — only the listed repos are available.\n\n" +
+  "Use the tools whenever the context does not fully answer the question — " +
+  "do not guess about code you can read. Treat any provided digests as " +
+  "background, not ground truth.\n\n" +
+  "CITATIONS (use these exact forms so the app can render clickable " +
+  "links):\n" +
+  "- Video moment: [TS:<videoId>:mm:ss] (always include the video id — " +
+  "there may be several videos).\n" +
+  "- File: [FILE:<repo>:path/from/root]\n" +
+  "- Commit: [COMMIT:<repo>:sha]\n" +
+  "Cite every video moment, file, and commit you draw from. Answer in " +
+  "concise Markdown. If something cannot be found in the sources or with " +
+  "the tools, say so plainly.";
+
+/** Repo tool declarations with a `repo` parameter constrained to members. */
+function projectToolDeclarations(repoNames: string[]): FunctionDeclaration[] {
+  const repoParam = {
+    type: Type.STRING,
+    description: `Which member repository to act on. One of: ${repoNames.join(", ")}`,
+    enum: repoNames,
+  };
+  return REPO_TOOL_DECLARATIONS.map((d) => ({
+    ...d,
+    parameters: {
+      type: Type.OBJECT,
+      properties: { repo: repoParam, ...(d.parameters?.properties ?? {}) },
+      required: ["repo", ...(d.parameters?.required ?? [])],
+    },
+  }));
+}
+
+/** A video attached to a project chat. */
+export interface ProjectChatVideo {
+  id: string;
+  name: string;
+  file: GeminiFile;
+  summary: string | null;
+}
+
+/**
+ * Agentic project Q&A: videos are attached as media, and Gemini can research
+ * every member repo through `repo`-parameterized GitHub tools. The executor
+ * receives the `repo` argument and routes to the right repository.
+ */
+export function generateProjectChatReply(
+  apiKey: string,
+  question: string,
+  history: ChatMessage[],
+  projectContext: string,
+  repoNames: string[],
+  videos: ProjectChatVideo[],
+  execute: ToolExecutor,
+  onToolCall: ToolReporter = () => {},
+  maxToolTurns: number = DEFAULT_TOOL_TURNS,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const seedParts = projectSeedParts(videos, projectContext);
+
+  // Intercept propose_report locally: record the proposal, tell the model
+  // it's awaiting approval, and let the loop continue to a final answer.
+  let proposal: ReportProposal | undefined;
+  const executeWithProposal: ToolExecutor = async (name, args) => {
+    if (name === "propose_report") {
+      proposal = {
+        title: String(args.title ?? "Untitled report"),
+        prompt: String(args.prompt ?? ""),
+        status: "pending",
+      };
+      return {
+        status: "awaiting_user_approval",
+        note:
+          "The proposal is now shown to the user with Generate/Dismiss " +
+          "buttons. Do not call propose_report again; briefly tell the user " +
+          "what the report would cover and that it awaits their approval.",
+      };
+    }
+    return execute(name, args);
+  };
+
+  const spec: AgenticChatSpec = {
+    systemInstruction:
+      PROJECT_CHAT_SYSTEM_PROMPT +
+      "\n\nREPORTS: you can propose a written report with the propose_report " +
+      "tool. It only ASKS the user — never assume the report exists. Propose " +
+      "one when the user asks for a report or when one would clearly help.",
+    toolDeclarations: [...projectToolDeclarations(repoNames), PROPOSE_REPORT_DECLARATION],
+    seed: [
+      { role: "user", parts: seedParts },
+      { role: "model", parts: [{ text: "Understood. Ask me anything about this project." }] },
+    ],
+    describe: describeProjectToolCall,
+    exceededMessage: "Project research exceeded the tool-call limit without an answer.",
+  };
+  return runAgenticChat(
+    apiKey, question, history, spec, executeWithProposal, onToolCall, maxToolTurns, model
+  ).then((reply) => (proposal ? { ...reply, reportProposal: proposal } : reply));
+}
+
+/** Seed parts shared by project chat and report generation. */
+function projectSeedParts(videos: ProjectChatVideo[], projectContext: string): object[] {
+  const seedParts: object[] = [];
+  for (const v of videos) {
+    const fileData = v.file.mimeType
+      ? { fileUri: v.file.uri, mimeType: v.file.mimeType }
+      : { fileUri: v.file.uri };
+    seedParts.push({ fileData });
+    seedParts.push({
+      text:
+        `The media above is video "${v.name}" (videoId: ${v.id}).` +
+        (v.summary ? `\nIts written summary:\n${v.summary}` : ""),
+    });
+  }
+  seedParts.push({ text: projectContext });
+  return seedParts;
+}
+
+/** Human-readable label for a project tool call, shown in the chat UI. */
+function describeProjectToolCall(name: string, args: Record<string, unknown>): string {
+  if (name === "propose_report") return `Proposing report “${args.title}”…`;
+  const repo = args.repo ? `${args.repo}: ` : "";
+  return `${repo}${describeToolCall(name, args)}`;
+}
+
+/**
+ * The chat can PROPOSE a report but never generate one on its own — the
+ * tool records the proposal and immediately returns an "awaiting approval"
+ * result. The UI renders an approval card; generation only happens when
+ * the user explicitly clicks Generate.
+ */
+const PROPOSE_REPORT_DECLARATION: FunctionDeclaration = {
+  name: "propose_report",
+  description:
+    "Propose generating a written report over the project's sources. This does " +
+    "NOT generate anything — it asks the user for approval. Use it when the " +
+    "user asks for a report or when one would clearly help. Provide a concise " +
+    "title and the full generation prompt (instructions describing what the " +
+    "report should cover).",
+  parameters: {
+    type: Type.OBJECT,
+    properties: {
+      title: { type: Type.STRING, description: "Concise report title." },
+      prompt: {
+        type: Type.STRING,
+        description: "Full instructions for what the report should cover and how.",
+      },
+    },
+    required: ["title", "prompt"],
+  },
+};
+
+/** Default purpose prompt for the New-report flow (editable by the user). */
+export const DEFAULT_REPORT_PROMPT =
+  "Cross-reference the project's videos against its repositories. For each " +
+  "claim, decision, or demonstration in the videos, verify it against the " +
+  "actual code and commits: does the implementation match what was said? " +
+  "Walk through the material thematically, citing the exact video moments " +
+  "and the files/commits that substantiate (or contradict) them. Call out " +
+  "anything shown in a video that has since changed in the code, and " +
+  "anything in the code the videos never mention but a reader should know.";
+
+const PROJECT_REPORT_SYSTEM_PROMPT =
+  "You are a senior engineer writing a REPORT over a project's sources — " +
+  "GitHub repositories (via live tools) and videos (attached as media). " +
+  "Research thoroughly with the tools before writing: read the relevant " +
+  "files and commits rather than guessing. Every repo tool takes a `repo` " +
+  "parameter naming which member repository to act on.\n\n" +
+  "When you are done researching, output ONLY the final report as " +
+  "well-structured Markdown with a # title heading, using these exact " +
+  "citation forms so the app can render clickable links:\n" +
+  "- Video moment: [TS:<videoId>:mm:ss]\n" +
+  "- File: [FILE:<repo>:path/from/root]\n" +
+  "- Commit: [COMMIT:<repo>:sha]\n\n" +
+  "SCREENSHOTS: mark up to 8 illustration-worthy video moments with a " +
+  "marker on its own line in the exact form [SHOT:<videoId>:mm:ss caption " +
+  "text]. The app replaces each with a captured still from that video. Use " +
+  "them where a visual genuinely helps (a finished diagram, a key screen, " +
+  "a pivotal step).\n\n" +
+  "Be concrete and complete — the report should stand alone for someone " +
+  "who never watched the videos or read the code.";
+
+/**
+ * Generate a project report: same agentic loop and sources as project chat,
+ * but driven by a report-writer prompt. Returns the raw markdown (with
+ * [SHOT:…] markers still in place — the caller runs the screenshot pass).
+ */
+export function generateProjectReport(
+  apiKey: string,
+  reportPrompt: string,
+  projectContext: string,
+  repoNames: string[],
+  videos: ProjectChatVideo[],
+  execute: ToolExecutor,
+  onToolCall: ToolReporter = () => {},
+  maxToolTurns: number = DEFAULT_TOOL_TURNS,
+  model: ModelId = DEFAULT_MODEL
+): Promise<ChatReply> {
+  const seedParts = projectSeedParts(videos, projectContext);
+  const spec: AgenticChatSpec = {
+    systemInstruction: PROJECT_REPORT_SYSTEM_PROMPT,
+    toolDeclarations: projectToolDeclarations(repoNames),
+    seed: [
+      { role: "user", parts: seedParts },
+      { role: "model", parts: [{ text: "Understood. Give me the report instructions." }] },
+    ],
+    describe: describeProjectToolCall,
+    exceededMessage: "Report research exceeded the tool-call limit without a result.",
+  };
+  return runAgenticChat(apiKey, reportPrompt, [], spec, execute, onToolCall, maxToolTurns, model);
 }
 
 const PAGE_CHAT_SYSTEM_PROMPT =

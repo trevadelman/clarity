@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from "svelte";
-  import { X, ExternalLink, Globe } from "lucide-svelte";
+  import { ExternalLink } from "lucide-svelte";
   import { openUrl } from "@tauri-apps/plugin-opener";
   import {
     openResearchView, navigateResearchView, setResearchViewRect,
@@ -11,22 +11,13 @@
   interface Props {
     /** GitHub URL currently shown; changing it navigates the webview. */
     url: string;
-    /** Called when the user closes the panel. */
-    onClose: () => void;
-    /**
-     * CSS length reserved on the right for the chat panel. The native webview
-     * always renders above HTML, so the research view must shrink out of the
-     * chat's way rather than let the chat overlay it.
-     */
-    rightOffset?: string;
   }
 
-  let { url, onClose, rightOffset = "0px" }: Props = $props();
+  let { url }: Props = $props();
 
-  // The native child webview cannot be layered under HTML, so this component
-  // only reserves screen space: the placeholder div's rect is reported to
-  // Rust, which positions the real webview over it. All chrome (header strip)
-  // lives OUTSIDE that rect.
+  // Inline variant of ResearchPanel: instead of a fullscreen overlay, the
+  // native webview is positioned over this component's own rect, so it
+  // renders in normal document flow (like the video player in the canvas).
   let placeholderEl = $state<HTMLElement | null>(null);
   let opened = false;
   let destroyed = false;
@@ -59,9 +50,7 @@
     }
   }
 
-  // Open on first URL, navigate on subsequent URL changes. Depends on
-  // both `url` and `placeholderEl` so the first open retries once the
-  // placeholder has mounted and been laid out.
+  // Open on first URL, navigate on subsequent URL changes.
   $effect(() => {
     const target = url;
     const el = placeholderEl;
@@ -80,8 +69,6 @@
           if (destroyed || !rect || rect.width === 0) return;
           await openResearchView(target, rect);
           opened = true;
-          // The panel may have been destroyed while the open was in
-          // flight (e.g. navigation); don't leave an orphaned webview.
           if (destroyed) await closeResearchView();
         } else {
           await navigateResearchView(target);
@@ -110,66 +97,32 @@
   });
 </script>
 
-<aside class="research" style:right={rightOffset}>
-  <header class="research-head">
-    <span class="glyph"><Globe size={16} /></span>
-    <div class="head-text">
-      <strong>Live view</strong>
-      <span class="crumb" title={pageLabel}>{pageLabel}</span>
-    </div>
-    <button
-      class="icon-btn"
-      onclick={() => openUrl(url)}
-      title="Open in browser"
-      aria-label="Open in browser"
-    >
-      <ExternalLink size={14} />
-    </button>
-    <button class="icon-btn" onclick={onClose} title="Close research view" aria-label="Close research view">
-      <X size={15} />
-    </button>
-  </header>
-  <!-- Layout reservation only: the native webview renders over this rect. -->
-  <div class="placeholder" bind:this={placeholderEl}></div>
-</aside>
+<div class="crumb-row">
+  <span class="crumb" title={pageLabel}>{pageLabel}</span>
+  <button
+    class="icon-btn"
+    onclick={() => openUrl(url)}
+    title="Open in browser"
+    aria-label="Open in browser"
+  >
+    <ExternalLink size={13} />
+  </button>
+</div>
+<!-- Layout reservation only: the native webview renders over this rect. -->
+<div class="placeholder" bind:this={placeholderEl}></div>
 
 <style>
-  .research {
-    /* Main-content overlay: starts after the nav rail (--sidebar-w from the
-       layout) and leaves room on the right for the chat via rightOffset. */
-    position: fixed;
-    top: var(--titlebar-h, 0px);
-    left: var(--sidebar-w, 0px);
-    right: 0;
-    bottom: 0;
-    border-left: 1px solid var(--border);
-    z-index: 500;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    transition: right 0.2s ease, left 0.2s ease;
-  }
-  .research-head {
+  .crumb-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    /* Fixed height shared with ChatPanel's header so the two align. */
-    height: var(--panel-head-h, 52px);
-    padding: 0 1rem;
-    flex-shrink: 0;
+    padding: 0.35rem 0.8rem;
     border-bottom: 1px solid var(--border);
   }
-  .glyph { display: inline-flex; color: var(--accent); flex-shrink: 0; }
-  .head-text {
+  .crumb {
     flex: 1;
     min-width: 0;
-    display: flex;
-    flex-direction: column;
-    line-height: 1.25;
-  }
-  .crumb {
-    min-width: 0;
-    font-size: 0.78rem;
+    font-size: 0.76rem;
     font-family: "JetBrains Mono", monospace;
     color: var(--text-dim);
     white-space: nowrap;
@@ -179,8 +132,8 @@
   .icon-btn {
     display: grid;
     place-items: center;
-    width: 30px;
-    height: 30px;
+    width: 26px;
+    height: 26px;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: transparent;
@@ -189,5 +142,5 @@
     flex-shrink: 0;
   }
   .icon-btn:hover { background: var(--hover); color: var(--text); }
-  .placeholder { flex: 1; background: var(--bg); }
+  .placeholder { height: 68vh; background: var(--bg); }
 </style>

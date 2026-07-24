@@ -5,7 +5,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import {
     Library, Plus, Settings, Moon, Sun, Video, Download, X,
-    PanelLeftClose, PanelLeftOpen, ChevronDown, Globe,
+    PanelLeftClose, PanelLeftOpen, ChevronDown, Globe, FolderKanban,
   } from "lucide-svelte";
   import { marked } from "marked";
   import { theme, toggleTheme, initTheme } from "$lib/theme";
@@ -30,6 +30,7 @@
 
   const links = [
     { href: "/", label: "Library", icon: Library },
+    { href: "/projects", label: "Projects", icon: FolderKanban },
     { href: "/add", label: "Add source", icon: Plus },
     { href: "/settings", label: "Settings", icon: Settings },
   ];

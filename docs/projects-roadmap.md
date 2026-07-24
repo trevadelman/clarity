@@ -1,6 +1,14 @@
 # Projects — Multi-Source Workspaces with Generated Reports
 
-> **Status: design agreed, not started.** Target: post-v2.0.0.
+> **Status: built.** Projects, project chat, and reports (generation with
+> screenshots, source selection, regenerate, delete, HTML export) are all
+> implemented. Reports use their own high tool-turn budget
+> (`REPORT_MAX_TOOL_TURNS`) independent of the chat setting.
+>
+> Remaining polish (non-blocking): canned template picker (a single
+> editable default prompt exists), provenance chips in the report viewer
+> (sourceIds are recorded but not displayed), and spill-to-disk for very
+> large report markdown (currently always inline in projects.json).
 
 ## Origin
 
@@ -50,9 +58,20 @@ Project
 
 - Sidebar (library mode) gains a **Projects** link → `/projects` (list)
   and `/projects/[id]` (detail).
-- Project detail: header (name, member chips), **Chat** and **Reports**
-  tabs, and an "Add from library" picker (checkbox list of library
-  items, filterable by type).
+- Project detail is a **workspace: canvas + docked chat** (no tabs).
+  - Header: name (inline rename), member chips, "Add from library"
+    picker.
+  - **Canvas** (main window) defaults to members + reports list, and is
+    driven contextually: chat citation chips populate it —
+    `[FILE:…]`/`[COMMIT:…]` open the research view scoped to the right
+    member repo, `[TS:videoId:mm:ss]` loads an inline player for that
+    member seeked to the moment, `[REPORT:id]` opens the report.
+    Clicking a member chip does the same without chat. A "back to
+    overview" affordance resets the canvas.
+  - **Chat** reuses the standard `ChatPanel.svelte` FAB/docked panel
+    (same as video/library/page chat) — no bespoke chat UI.
+  - Multi-video ambiguity: the project chat prompt mandates
+    video-qualified timestamps (`[TS:videoId:mm:ss]`).
 
 ## Chat — merged multi-repo toolset
 
@@ -80,8 +99,11 @@ Canned templates:
 - **Change summary** — freeform digest over selected sources.
 
 Reports are point-in-time artifacts with a "regenerate" button (no
-scheduling/auto-update). Export: .md + images (or self-contained HTML —
-decide at build time).
+scheduling/auto-update). Export: a single self-contained HTML file with
+screenshots inlined as data URLs and citation chips flattened to text.
+The New-report modal lets the user select which project members to use
+as sources; `Report.sourceIds` records what was consulted and drives
+regeneration.
 
 ## Storage
 

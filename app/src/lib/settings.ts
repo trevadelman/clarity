@@ -1,6 +1,6 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 import { writable } from "svelte/store";
-import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "./gemini";
+import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT, DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "./gemini";
 
 const STORE_FILE = "settings.json";
 const KEY_API = "geminiApiKey";
@@ -9,6 +9,8 @@ const KEY_DIAGRAM_PROMPT = "diagramPrompt";
 const KEY_GITHUB_TOKEN = "githubToken";
 const KEY_MAX_TOOL_TURNS = "maxToolTurns";
 const KEY_BROWSE_ENABLED = "browseEnabled";
+const KEY_AUTO_EDIT_ENABLED = "autoEditEnabled";
+const KEY_VIDEO_MODEL = "videoModel";
 
 /** Default research-turn budget for the agentic repo chat. */
 export const DEFAULT_MAX_TOOL_TURNS = 15;
@@ -72,6 +74,25 @@ export async function saveBrowseEnabled(enabled: boolean): Promise<void> {
   browseEnabled.set(enabled);
 }
 
+/**
+ * Whether Auto-Edit is enabled (on by default; macOS-only). Reactive mirror
+ * of the persisted setting so project pages show/hide the feature live.
+ * Hydrated once at startup by `initAutoEditEnabled`.
+ */
+export const autoEditEnabled = writable(true);
+
+export async function initAutoEditEnabled(): Promise<void> {
+  const store = await getStore();
+  autoEditEnabled.set((await store.get<boolean>(KEY_AUTO_EDIT_ENABLED)) ?? true);
+}
+
+export async function saveAutoEditEnabled(enabled: boolean): Promise<void> {
+  const store = await getStore();
+  await store.set(KEY_AUTO_EDIT_ENABLED, enabled);
+  await store.save();
+  autoEditEnabled.set(enabled);
+}
+
 export async function loadMaxToolTurns(): Promise<number> {
   const store = await getStore();
   const n = await store.get<number>(KEY_MAX_TOOL_TURNS);
@@ -81,6 +102,19 @@ export async function loadMaxToolTurns(): Promise<number> {
 export async function saveMaxToolTurns(turns: number): Promise<void> {
   const store = await getStore();
   await store.set(KEY_MAX_TOOL_TURNS, turns);
+  await store.save();
+}
+
+/** Veo tier used for image-to-video generation (defaults to lite). */
+export async function loadVideoModel(): Promise<string> {
+  const store = await getStore();
+  const id = await store.get<string>(KEY_VIDEO_MODEL);
+  return id && VIDEO_MODELS.some((m) => m.id === id) ? id : DEFAULT_VIDEO_MODEL;
+}
+
+export async function saveVideoModel(id: string): Promise<void> {
+  const store = await getStore();
+  await store.set(KEY_VIDEO_MODEL, id);
   await store.save();
 }
 

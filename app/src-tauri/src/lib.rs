@@ -1,3 +1,5 @@
+mod auto_edit;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -716,6 +718,7 @@ pub fn run() {
 
     builder
         .manage(TabState::default())
+        .manage(auto_edit::EditJobs::default())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -746,7 +749,9 @@ pub fn run() {
             navigate_tab,
             eval_in_tab,
             clear_browsing_data,
-            open_devtools
+            open_devtools,
+            auto_edit::render_edit,
+            auto_edit::cancel_render
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

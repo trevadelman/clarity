@@ -8,20 +8,35 @@
   import {
     ArrowLeft, FolderKanban, Plus, X, Pencil, Check, Download,
     FileText, GitBranch, Video, MonitorPlay, Film, Trash2, RefreshCw,
+    Clapperboard, Image as ImageIcon, Sparkles, ChevronDown,
   } from "lucide-svelte";
   import {
     getProject, updateProject, addMember, removeMember, saveProjectChat,
-    removeReport, type Project, type Report,
+    removeReport, removeEdit, type Project, type Report, type Edit,
   } from "$lib/projects";
+  import {
+    generateAndSaveEdit, removeEditDir, exportEdit, editOutputAbsPath,
+  } from "$lib/autoEdit";
+  import { isMac } from "$lib/platform";
+  import { autoEditEnabled } from "$lib/settings";
+  import AutoEditModal, { type AutoEditSubmit } from "$lib/AutoEditModal.svelte";
   import {
     generateAndSaveReport, removeReportDir, resolveReportImages, exportReportHtml,
   } from "$lib/reports";
   import {
-    listVideos, ensureActiveFile, isGitHub, parseYouTubeId,
+    listVideos, ensureActiveFile, isGitHub, isImage, parseYouTubeId,
+    addGeneratedImage, addGeneratedVideo, setThumbnail,
+    renameVideo, deleteVideo,
     type VideoRecord, type SourceType,
   } from "$lib/videoLibrary";
+  import { confirm } from "@tauri-apps/plugin-dialog";
+  import { formatDuration } from "$lib/thumbnail";
+  import { probeVideo } from "$lib/thumbnail";
+  import { readFile } from "@tauri-apps/plugin-fs";
   import {
     generateProjectChatReply, DEFAULT_REPORT_PROMPT,
+    generateImage, IMAGE_COST_PER_IMAGE,
+    generateVideoFromImage, videoModelInfo, DEFAULT_VIDEO_MODEL,
     type ChatMessage, type ProjectChatVideo,
   } from "$lib/gemini";
   import {
@@ -29,7 +44,8 @@
     fetchDirectory, searchCode, type RepoRef,
   } from "$lib/github";
   import {
-    loadApiKey, loadGitHubToken, loadMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
+    loadApiKey, loadGitHubToken, loadMaxToolTurns, loadVideoModel,
+    DEFAULT_MAX_TOOL_TURNS,
   } from "$lib/settings";
   import ChatPanel from "$lib/ChatPanel.svelte";
   import ResearchPanel from "$lib/ResearchPanel.svelte";
@@ -51,10 +67,17 @@
   type Canvas =
     | { kind: "overview" }
     | { kind: "video"; videoId: string; sec: number | null }
+    | { kind: "image"; videoId: string }
     | { kind: "repo"; url: string; label: string }
-    | { kind: "report"; reportId: string };
+    | { kind: "report"; reportId: string }
+    | { kind: "edit"; editId: string };
   let canvas = $state<Canvas>({ kind: "overview" });
   let playerEl = $state<HTMLVideoElement | null>(null);
+  // Abandon any in-progress source rename when the canvas switches.
+  $effect(() => {
+    void canvas;
+    editingSource = false;
+  });
 
   // Chat-driven overlays: citation chips and live research render full-page
   // over the workspace (like the repo page), keeping the chat alongside.
@@ -76,6 +99,15 @@
   let reportSourceIds = $state<Set<string>>(new Set());
   let appData = $state("");
 
+  // ── Auto-Edit ───────────────────────────────────────────────────────
+  let editModalOpen = $state(false);
+  let editBusy = $state(false);
+  let editStatus = $state<string | null>(null);
+  /** Render progress in [0, 1], or null while planning. */
+  let editProgress = $state<number | null>(null);
+  /** Resolved absolute path of the canvas edit's MP4. */
+  let canvasEditSrc = $state("");
+
   let pickerOpen = $state(false);
   let pickerFilter = $state("");
   let editingName = $state(false);
@@ -90,8 +122,42 @@
     members.filter((m): m is VideoRecord => m != null && isGitHub(m) && m.repoInfo != null)
   );
   const videoMembers = $derived(
-    members.filter((m): m is VideoRecord => m != null && !isGitHub(m))
+    members.filter((m): m is VideoRecord => m != null && !isGitHub(m) && !isImage(m))
   );
+
+  // ── Member tree groups (folders by asset type) ─────────────────────
+  const generatedMembers = $derived(
+    members.filter(
+      (m): m is VideoRecord =>
+        m != null && (isImage(m) || (m.tags?.includes("generated") ?? false))
+    )
+  );
+  const uploadMembers = $derived(
+    videoMembers.filter((m) => !(m.tags?.includes("generated") ?? false))
+  );
+  const removedMemberIds = $derived(
+    (project?.memberIds ?? []).filter((id, i) => members[i] == null)
+  );
+  const memberGroups = $derived(
+    [
+      { label: "Repos", items: repoMembers },
+      { label: "Videos", items: uploadMembers },
+      { label: "Generated", items: generatedMembers },
+    ].filter((g) => g.items.length > 0)
+  );
+  let collapsedGroups = $state<Set<string>>(new Set());
+  function toggleGroup(label: string) {
+    const next = new Set(collapsedGroups);
+    if (next.has(label)) next.delete(label);
+    else next.add(label);
+    collapsedGroups = next;
+  }
+  function isActiveMember(m: VideoRecord): boolean {
+    return (
+      ((canvas.kind === "video" || canvas.kind === "image") && canvas.videoId === m.id) ||
+      (canvas.kind === "repo" && m.repoInfo?.repo === canvas.label)
+    );
+  }
   /** Tool `repo` value → RepoRef info. Keyed by short repo name. */
   const repoByName = $derived(
     new Map(repoMembers.map((m) => [m.repoInfo!.repo, m.repoInfo!]))
@@ -119,9 +185,27 @@
       : null
   );
 
+  const canvasEdit = $derived(
+    canvas.kind === "edit"
+      ? project?.edits.find((e) => e.id === (canvas as { editId: string }).editId) ?? null
+      : null
+  );
+  $effect(() => {
+    if (canvasEdit) {
+      void editOutputAbsPath(canvasEdit).then((p) => (canvasEditSrc = convertFileSrc(p)));
+    } else {
+      canvasEditSrc = "";
+    }
+  });
+
   const canvasVideo = $derived(
     canvas.kind === "video"
       ? videoMembers.find((v) => v.id === (canvas as { videoId: string }).videoId) ?? null
+      : null
+  );
+  const canvasImage = $derived(
+    canvas.kind === "image"
+      ? generatedMembers.find((v) => v.id === (canvas as { videoId: string }).videoId) ?? null
       : null
   );
   const canvasIsYt = $derived(canvasVideo?.sourceType === "youtube");
@@ -146,6 +230,7 @@
     apiKey = await loadApiKey();
     githubToken = await loadGitHubToken();
     maxToolTurns = await loadMaxToolTurns();
+    videoModel = await loadVideoModel();
     appData = await appDataDir();
     await refresh();
   });
@@ -187,6 +272,7 @@
 
   function openMember(m: VideoRecord) {
     if (isGitHub(m)) showRepo(m);
+    else if (isImage(m)) canvas = { kind: "image", videoId: m.id };
     else showVideo(m.id);
   }
 
@@ -493,6 +579,80 @@
     if (scope && value) handleProjectCite(kind, scope, value);
   }
 
+  // ── Auto-Edit ───────────────────────────────────────────────────────
+
+  async function runEditGeneration(opts: AutoEditSubmit) {
+    if (!project) return;
+    editModalOpen = false;
+    editBusy = true;
+    editStatus = "Preparing sources…";
+    editProgress = null;
+    try {
+      // Attach the selected local videos as Gemini media with their real
+      // durations (the plan's timestamps are validated against these).
+      const videos = [];
+      for (const v of videoMembers) {
+        if (!opts.sourceIds.includes(v.id) || !v.localPath) continue;
+        const file = await ensureActiveFile(apiKey, v, () => {});
+        videos.push({
+          id: v.id,
+          name: v.videoName,
+          durationSec: v.durationSec ?? 0,
+          file,
+          localPath: v.localPath,
+        });
+      }
+      const edit = await generateAndSaveEdit({
+        apiKey,
+        projectId: project.id,
+        prompt: opts.prompt,
+        videos,
+        audioPath: opts.audioPath,
+        audioMode: opts.audioMode,
+        width: opts.width,
+        height: opts.height,
+        onStatus: (label) => (editStatus = label),
+        onProgress: (p) => (editProgress = p),
+      });
+      await refresh();
+      canvas = { kind: "edit", editId: edit.id };
+      toast.success("Edit rendered.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      editBusy = false;
+      editStatus = null;
+      editProgress = null;
+    }
+  }
+
+  async function handleDeleteEdit(edit: Edit) {
+    if (!project) return;
+    await removeEdit(project.id, edit.id);
+    await removeEditDir(edit.id);
+    if (canvas.kind === "edit" && canvas.editId === edit.id) showOverview();
+    await refresh();
+  }
+
+  async function handleExportEdit(edit: Edit) {
+    try {
+      const path = await exportEdit(edit);
+      if (path) toast.success("Edit exported.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function fmtSec(sec: number): string {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }
+
+  function editSourceName(videoId: string): string {
+    return library.find((r) => r.id === videoId)?.videoName ?? "removed source";
+  }
+
   function fmtDate(iso: string): string {
     return new Date(iso).toLocaleDateString(undefined, {
       month: "short", day: "numeric", year: "numeric",
@@ -510,7 +670,7 @@
   async function handleRemoveMember(libraryId: string) {
     if (!project) return;
     await removeMember(project.id, libraryId);
-    if (canvas.kind === "video" && canvas.videoId === libraryId) showOverview();
+    if ((canvas.kind === "video" || canvas.kind === "image") && canvas.videoId === libraryId) showOverview();
     await refresh();
   }
 
@@ -531,13 +691,146 @@
   }
 
   const sourceIcons: Record<SourceType, typeof Video> = {
+    image: ImageIcon,
     github: GitBranch,
     youtube: MonitorPlay,
     loom: Film,
     local: Video,
   };
   function iconFor(r: VideoRecord) {
+    // AI-generated clips get a distinct icon from uploaded footage.
+    if (r.sourceType === "local" && r.tags?.includes("generated")) return Sparkles;
     return sourceIcons[r.sourceType ?? "local"];
+  }
+
+  // ── Adaptive overview (Phase 3) ─────────────────────────────────────
+  // The Reports section only matters for research-style projects: show it
+  // when there's anything to show (repos to research, existing reports, or
+  // a run in flight). Studio (edits + generation) groups under one
+  // collapsible header, expanded by default and ordered first when the
+  // project's focus is "studio".
+  const showReports = $derived(
+    (project?.reports.length ?? 0) > 0 || repoMembers.length > 0 || reportBusy
+  );
+  const studioFirst = $derived(project?.focus === "studio");
+  let studioOpen = $state(true);
+
+  // ── In-studio generation (image → member; image → clip → member) ───
+  let genModalOpen = $state(false);
+  let genPrompt = $state("");
+  let genAspect = $state<"1:1" | "9:16" | "16:9">("16:9");
+  let genBusy = $state(false);
+  let animatePrompt = $state("");
+  let animating = $state(false);
+  let animateStatus = $state("");
+  let videoModel = $state(DEFAULT_VIDEO_MODEL);
+  const videoTier = $derived(videoModelInfo(videoModel));
+
+  async function handleGenerateImage() {
+    const prompt = genPrompt.trim();
+    if (!prompt || genBusy || !project) return;
+    genModalOpen = false;
+    genBusy = true;
+    try {
+      const result = await generateImage(apiKey, prompt, genAspect);
+      const name = prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt;
+      const record = await addGeneratedImage(name, result.image, prompt, result.costUsd);
+      await addMember(project.id, record.id);
+      await refresh();
+      canvas = { kind: "image", videoId: record.id };
+      toast.success("Image generated and added to the project.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      genBusy = false;
+    }
+  }
+
+  /** Read the stored image and base64-encode it (chunked to avoid stack limits). */
+  async function imageAsBase64(path: string): Promise<string> {
+    const bytes = await readFile(path);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  // ── Source editing (library-style: rename / delete / open) ─────────
+  let editingSource = $state(false);
+  let sourceNameDraft = $state("");
+
+  function startSourceRename(m: VideoRecord) {
+    sourceNameDraft = m.videoName;
+    editingSource = true;
+  }
+
+  async function saveSourceRename(m: VideoRecord) {
+    editingSource = false;
+    const name = sourceNameDraft.trim();
+    if (!name || name === m.videoName) return;
+    await renameVideo(m, name);
+    await refresh();
+  }
+
+  /** Delete the source from the entire library (and this project). */
+  async function handleDeleteSource(m: VideoRecord) {
+    const ok = await confirm(
+      `Delete "${m.videoName}" from your library? This removes the local copy and any Gemini upload, everywhere. This cannot be undone.`,
+      { title: "Delete source", kind: "warning" }
+    );
+    if (!ok) return;
+    try {
+      await deleteVideo(apiKey, m);
+      await removeMember(project!.id, m.id);
+      showOverview();
+      await refresh();
+      toast.success("Source deleted.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  function sourceMeta(m: VideoRecord): string {
+    const parts: string[] = [];
+    if (m.sizeBytes > 0) parts.push(`${(m.sizeBytes / (1024 * 1024)).toFixed(1)} MB`);
+    const dur = formatDuration(m.durationSec);
+    if (dur) parts.push(dur);
+    if (m.mimeType) parts.push(m.mimeType);
+    return parts.join(" · ");
+  }
+
+  async function handleAnimate(image: VideoRecord) {
+    if (animating || !animatePrompt.trim() || !project) return;
+    if (!apiKey) {
+      toast.error("Set your Gemini API key in Settings first.");
+      return;
+    }
+    animating = true;
+    try {
+      const base64 = await imageAsBase64(image.localPath);
+      const result = await generateVideoFromImage(
+        apiKey, base64, image.mimeType, animatePrompt.trim(),
+        (label) => (animateStatus = label),
+        videoModel
+      );
+      const clip = await addGeneratedVideo(
+        `${image.videoName} (animated)`, result.bytes, animatePrompt.trim(), result.costUsd
+      );
+      const probe = await probeVideo(clip.localPath);
+      await setThumbnail(clip, probe.thumbnail, probe.durationSec);
+      await addMember(project.id, clip.id);
+      await refresh();
+      animatePrompt = "";
+      canvas = { kind: "video", videoId: clip.id, sec: null };
+      toast.success("Video generated and added to the project.");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      animating = false;
+      animateStatus = "";
+    }
   }
 </script>
 
@@ -568,45 +861,59 @@
     {/if}
   </header>
 
-  <section class="members">
-    <div class="members-row">
-      {#each members as m, i (project.memberIds[i])}
-        {#if m}
-          {@const Icon = iconFor(m)}
-          <span
-            class="chip"
-            class:active={canvas.kind === "video" && canvas.videoId === m.id}
-          >
-            <Icon size={13} />
-            <button class="chip-name" onclick={() => openMember(m)} title="Open in workspace">
-              {m.videoName}
-            </button>
-            <button
-              class="chip-x"
-              onclick={() => handleRemoveMember(m.id)}
-              title="Remove from project"
-              aria-label="Remove from project"
-            >
-              <X size={12} />
-            </button>
-          </span>
-        {:else}
-          <span class="chip removed" title="This source was deleted from the library">
-            removed source
-            <button
-              class="chip-x"
-              onclick={() => handleRemoveMember(project!.memberIds[i])}
-              aria-label="Remove"
-            >
-              <X size={12} />
-            </button>
-          </span>
-        {/if}
-      {/each}
-      <button class="chip add" onclick={() => (pickerOpen = !pickerOpen)}>
-        <Plus size={13} /> Add from library
+  <div class="workspace">
+  <!-- ── Member tree (sources grouped by asset type) ──────────────── -->
+  <aside class="member-tree">
+    <div class="tree-head">Sources</div>
+    {#if memberGroups.length === 0 && removedMemberIds.length === 0}
+      <p class="tree-empty">No sources yet.</p>
+    {/if}
+    {#each memberGroups as group (group.label)}
+      <button
+        class="tree-folder"
+        onclick={() => toggleGroup(group.label)}
+        aria-expanded={!collapsedGroups.has(group.label)}
+      >
+        <span class="chev" class:open={!collapsedGroups.has(group.label)}>
+          <ChevronDown size={13} />
+        </span>
+        {group.label}
+        <span class="tree-count">{group.items.length}</span>
       </button>
-    </div>
+      {#if !collapsedGroups.has(group.label)}
+        <ul class="tree-items">
+          {#each group.items as m (m.id)}
+            {@const Icon = iconFor(m)}
+            <li class="tree-item" class:active={isActiveMember(m)}>
+              <button class="tree-name" onclick={() => openMember(m)} title="Open in workspace">
+                <Icon size={13} />
+                <span>{m.videoName}</span>
+              </button>
+              <button
+                class="tree-x"
+                onclick={() => handleRemoveMember(m.id)}
+                title="Remove from project"
+                aria-label="Remove from project"
+              >
+                <X size={12} />
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    {/each}
+    {#each removedMemberIds as rid (rid)}
+      <div class="tree-item removed" title="This source was deleted from the library">
+        <span class="tree-removed">removed source</span>
+        <button class="tree-x" onclick={() => handleRemoveMember(rid)} aria-label="Remove">
+          <X size={12} />
+        </button>
+      </div>
+    {/each}
+
+    <button class="tree-add" onclick={() => (pickerOpen = !pickerOpen)}>
+      <Plus size={13} /> Add from library
+    </button>
 
     {#if pickerOpen}
       <div class="picker">
@@ -633,8 +940,9 @@
         {/if}
       </div>
     {/if}
-  </section>
+  </aside>
 
+  <div class="workspace-main">
   <!-- ── Workspace canvas ─────────────────────────────────────────── -->
   {#if canvas.kind === "repo"}
     <section class="canvas">
@@ -687,13 +995,164 @@
         {@html renderReport(canvasReport)}
       </article>
     </section>
+  {:else if canvas.kind === "edit" && canvasEdit}
+    <section class="canvas">
+      <div class="canvas-head">
+        <button class="btn small" onclick={showOverview}>
+          <ArrowLeft size={13} /> Overview
+        </button>
+        <span class="canvas-title">{canvasEdit.title}</span>
+        <span class="canvas-meta mono">
+          {fmtDate(canvasEdit.createdAt)} · {fmtSec(canvasEdit.durationSec)} · ~${canvasEdit.costUsd.toFixed(2)}
+        </span>
+        <button
+          class="icon-btn"
+          onclick={() => handleExportEdit(canvasEdit)}
+          title="Export MP4"
+          aria-label="Export edit"
+        >
+          <Download size={14} />
+        </button>
+        <button
+          class="icon-btn danger"
+          onclick={() => handleDeleteEdit(canvasEdit)}
+          title="Delete edit"
+          aria-label="Delete edit"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+      {#if canvasEditSrc}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video class="player" src={canvasEditSrc} controls></video>
+      {/if}
+      <div class="edit-plan">
+        <h4>Edit plan</h4>
+        <ol>
+          {#each canvasEdit.plan.clips as clip, i (i)}
+            <li>
+              <button
+                class="clip-row"
+                onclick={() => showVideo(clip.videoId, clip.startSec)}
+                title="Open the source video at this moment"
+              >
+                <span class="clip-range mono">
+                  {fmtSec(clip.startSec)}–{fmtSec(clip.endSec)}
+                </span>
+                <span class="clip-source">{editSourceName(clip.videoId)}</span>
+                <span class="clip-reason">{clip.reason}</span>
+              </button>
+            </li>
+          {/each}
+        </ol>
+      </div>
+    </section>
+  {:else if canvas.kind === "image" && canvasImage}
+    <section class="canvas">
+      <div class="canvas-head">
+        <button class="btn small" onclick={showOverview}>
+          <ArrowLeft size={13} /> Overview
+        </button>
+        {#if editingSource}
+          <input
+            class="source-name-input"
+            bind:value={sourceNameDraft}
+            onkeydown={(e) => {
+              if (e.key === "Enter") saveSourceRename(canvasImage);
+              if (e.key === "Escape") editingSource = false;
+            }}
+          />
+          <button class="icon-btn" onclick={() => saveSourceRename(canvasImage)} title="Save name">
+            <Check size={14} />
+          </button>
+        {:else}
+          <span class="canvas-title">{canvasImage.videoName}</span>
+          <button class="icon-btn" onclick={() => startSourceRename(canvasImage)} title="Rename">
+            <Pencil size={13} />
+          </button>
+        {/if}
+        <span class="canvas-meta mono">{sourceMeta(canvasImage)}</span>
+        <a class="icon-btn" href={`/video/${canvasImage.id}`} title="Open in library">
+          <FileText size={14} />
+        </a>
+        <button
+          class="icon-btn danger"
+          onclick={() => handleDeleteSource(canvasImage)}
+          title="Delete from library"
+          aria-label="Delete from library"
+        >
+          <Trash2 size={14} />
+        </button>
+      </div>
+      {#if canvasImage.localPath}
+        <img
+          class="canvas-image"
+          src={convertFileSrc(canvasImage.localPath)}
+          alt={canvasImage.videoName}
+        />
+      {/if}
+      <div class="animate-box">
+        <div class="animate-head"><Film size={14} /> Animate this image</div>
+        <textarea
+          rows="2"
+          placeholder="Describe the motion, e.g. “The flamingo slowly wades forward as ripples spread”…"
+          bind:value={animatePrompt}
+          disabled={animating}
+        ></textarea>
+        <div class="animate-actions">
+          <button
+            class="btn primary"
+            onclick={() => handleAnimate(canvasImage)}
+            disabled={animating || !animatePrompt.trim() || !apiKey}
+          >
+            {#if animating}
+              <span class="spinner"></span> {animateStatus || "Working…"}
+            {:else}
+              <Sparkles size={15} /> Generate video
+            {/if}
+          </button>
+          <span class="gen-hint mono">
+            {videoTier.label} · ~8s clip · ~${videoTier.costPerClip.toFixed(2)} · 1-2 min
+          </span>
+        </div>
+      </div>
+    </section>
   {:else if canvas.kind === "video" && canvasVideo}
     <section class="canvas">
       <div class="canvas-head">
         <button class="btn small" onclick={showOverview}>
           <ArrowLeft size={13} /> Overview
         </button>
-        <span class="canvas-title">{canvasVideo.videoName}</span>
+        {#if editingSource}
+          <input
+            class="source-name-input"
+            bind:value={sourceNameDraft}
+            onkeydown={(e) => {
+              if (e.key === "Enter") saveSourceRename(canvasVideo);
+              if (e.key === "Escape") editingSource = false;
+            }}
+          />
+          <button class="icon-btn" onclick={() => saveSourceRename(canvasVideo)} title="Save name">
+            <Check size={14} />
+          </button>
+        {:else}
+          <span class="canvas-title">{canvasVideo.videoName}</span>
+          <button class="icon-btn" onclick={() => startSourceRename(canvasVideo)} title="Rename">
+            <Pencil size={13} />
+          </button>
+        {/if}
+        <span class="canvas-meta mono">{sourceMeta(canvasVideo)}</span>
+        <a class="icon-btn" href={`/video/${canvasVideo.id}`} title="Open in library">
+          <FileText size={14} />
+        </a>
+        <button
+          class="icon-btn danger"
+          onclick={() => handleDeleteSource(canvasVideo)}
+          title="Delete from library"
+          aria-label="Delete from library"
+        >
+          <Trash2 size={14} />
+        </button>
       </div>
       {#if canvasIsYt}
         {#if canvasYtSrc}
@@ -722,7 +1181,7 @@
       {/if}
     </section>
   {:else}
-    <section class="overview">
+    {#snippet reportsSection()}
       <div class="reports-head">
         <h2><FileText size={16} /> Reports</h2>
         <button class="btn primary" onclick={openReportModal} disabled={reportBusy || !apiKey}>
@@ -735,7 +1194,7 @@
           <span class="mono">{reportStatus ?? "Generating report…"}</span>
         </div>
       {/if}
-      {#if project.reports.length === 0 && !reportBusy}
+      {#if project!.reports.length === 0 && !reportBusy}
         <div class="placeholder">
           <FileText size={30} />
           <p>No reports yet.</p>
@@ -745,9 +1204,9 @@
             “New report”, or ask the chat to propose one.
           </p>
         </div>
-      {:else if project.reports.length > 0}
+      {:else if project!.reports.length > 0}
         <ul class="report-list">
-          {#each project.reports as r (r.id)}
+          {#each project!.reports as r (r.id)}
             <li>
               <button class="report-card" onclick={() => (canvas = { kind: "report", reportId: r.id })}>
                 <FileText size={16} />
@@ -770,7 +1229,164 @@
           {/each}
         </ul>
       {/if}
+    {/snippet}
+
+    {#snippet studioSection()}
+      {#if isMac && $autoEditEnabled}
+        <div class="reports-head" class:edits-head={!studioFirst}>
+          <button
+            class="studio-toggle"
+            onclick={() => (studioOpen = !studioOpen)}
+            aria-expanded={studioOpen}
+          >
+            <h2><Clapperboard size={16} /> Studio</h2>
+            <span class="chev" class:open={studioOpen}><ChevronDown size={15} /></span>
+          </button>
+          {#if studioOpen}
+            <div class="studio-actions">
+              <button
+                class="btn"
+                onclick={() => { genPrompt = ""; genModalOpen = true; }}
+                disabled={genBusy || !apiKey}
+              >
+                <ImageIcon size={15} /> New image
+              </button>
+              <button
+                class="btn primary"
+                onclick={() => (editModalOpen = true)}
+                disabled={editBusy || !apiKey}
+              >
+                <Plus size={15} /> New edit
+              </button>
+            </div>
+          {/if}
+        </div>
+        {#if genBusy}
+          <div class="report-progress">
+            <span class="spinner"></span>
+            <span class="mono">Generating image…</span>
+          </div>
+        {/if}
+        {#if animating}
+          <div class="report-progress">
+            <span class="spinner"></span>
+            <span class="mono">{animateStatus || "Generating video…"}</span>
+          </div>
+        {/if}
+        {#if editBusy}
+          <div class="report-progress">
+            <span class="spinner"></span>
+            <span class="mono">{editStatus ?? "Generating edit…"}</span>
+            {#if editProgress != null}
+              <progress value={editProgress} max="1"></progress>
+              <span class="mono">{Math.round(editProgress * 100)}%</span>
+            {/if}
+          </div>
+        {/if}
+        {#if studioOpen}
+          {#if project!.edits.length === 0 && !editBusy}
+            <div class="placeholder">
+              <Clapperboard size={30} />
+              <p>No edits yet.</p>
+              <p class="hint">
+                Have Gemini watch this project's local videos, pick the best
+                moments, and splice them into a finished MP4 — with your own
+                music track if you like. Or start from nothing: “New image”
+                generates an image you can animate into a clip, right here.
+              </p>
+            </div>
+          {:else if project!.edits.length > 0}
+            <ul class="report-list">
+              {#each project!.edits as e (e.id)}
+                <li>
+                  <button class="report-card" onclick={() => (canvas = { kind: "edit", editId: e.id })}>
+                    <Clapperboard size={16} />
+                    <div class="report-info">
+                      <span class="report-title">{e.title}</span>
+                      <span class="report-meta mono">
+                        {fmtDate(e.createdAt)} · {fmtSec(e.durationSec)} · ~${e.costUsd.toFixed(2)}
+                      </span>
+                    </div>
+                  </button>
+                  <button
+                    class="icon-btn danger"
+                    onclick={() => handleDeleteEdit(e)}
+                    title="Delete edit"
+                    aria-label="Delete edit"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </li>
+              {/each}
+            </ul>
+          {/if}
+        {/if}
+      {/if}
+    {/snippet}
+
+    <section class="overview">
+      {#if studioFirst}
+        {@render studioSection()}
+        {#if showReports}
+          <div class="section-gap"></div>
+          {@render reportsSection()}
+        {/if}
+      {:else}
+        {#if showReports}
+          {@render reportsSection()}
+        {/if}
+        {@render studioSection()}
+        {#if !showReports && !(isMac && $autoEditEnabled)}
+          <div class="placeholder">
+            <FolderKanban size={30} />
+            <p>Add sources to get started.</p>
+          </div>
+        {/if}
+      {/if}
     </section>
+  {/if}
+  </div>
+  </div>
+
+  {#if genModalOpen}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_noninteractive_element_interactions -->
+    <div class="modal-scrim" onclick={() => (genModalOpen = false)}></div>
+    <div class="modal" role="dialog" aria-label="Generate image">
+      <h3><ImageIcon size={16} /> Generate an image</h3>
+      <label class="field">
+        <span>Prompt</span>
+        <textarea
+          rows="3"
+          placeholder="e.g. A pink flamingo standing in still water at sunrise…"
+          bind:value={genPrompt}
+        ></textarea>
+      </label>
+      <div class="sources-field">
+        <span class="sources-label">Aspect ratio</span>
+        <div class="aspect-row">
+          {#each ["1:1", "9:16", "16:9"] as const as a (a)}
+            <button class="aspect-opt" class:on={genAspect === a} onclick={() => (genAspect = a)}>
+              {a}
+            </button>
+          {/each}
+        </div>
+      </div>
+      <p class="gen-hint mono">~${IMAGE_COST_PER_IMAGE.toFixed(2)} per image · lands directly in this project's sources</p>
+      <div class="modal-actions">
+        <button class="btn" onclick={() => (genModalOpen = false)}>Cancel</button>
+        <button class="btn primary" onclick={handleGenerateImage} disabled={!genPrompt.trim()}>
+          <Sparkles size={14} /> Generate
+        </button>
+      </div>
+    </div>
+  {/if}
+
+  {#if editModalOpen}
+    <AutoEditModal
+      members={videoMembers}
+      onGenerate={runEditGeneration}
+      onClose={() => (editModalOpen = false)}
+    />
   {/if}
 
   {#if reportModalOpen}
@@ -961,67 +1577,205 @@
   .btn:hover { background: var(--hover); }
   .btn.small { padding: 0.35rem 0.65rem; font-size: 0.8rem; }
 
-  .members { margin-bottom: 1.1rem; }
-  .members-row { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center; }
-  .chip {
-    display: inline-flex;
+  /* ── Workspace layout: member tree + canvas ── */
+  .workspace {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .workspace { grid-template-columns: 1fr; }
+  }
+  .workspace-main { min-width: 0; }
+
+  .member-tree {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 0.65rem 0.55rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    position: sticky;
+    top: 0.5rem;
+  }
+  .tree-head {
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    padding: 0.1rem 0.45rem 0.35rem;
+  }
+  .tree-empty { margin: 0; padding: 0.2rem 0.45rem 0.4rem; font-size: 0.82rem; color: var(--text-dim); }
+  .tree-folder {
+    display: flex;
     align-items: center;
     gap: 0.35rem;
-    padding: 0.32rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    background: var(--surface);
-    font-size: 0.82rem;
+    width: 100%;
+    padding: 0.35rem 0.45rem;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
     color: var(--text);
+    font-size: 0.84rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    text-align: left;
   }
-  .chip.active { border-color: var(--accent); }
-  .chip :global(svg) { color: var(--accent); flex-shrink: 0; }
-  .chip-name {
+  .tree-folder:hover { background: var(--hover); }
+  .tree-folder .chev {
+    display: inline-flex;
+    color: var(--text-dim);
+    transition: transform 0.15s;
+    transform: rotate(-90deg);
+  }
+  .tree-folder .chev.open { transform: rotate(0deg); }
+  .tree-count {
+    margin-left: auto;
+    font-size: 0.68rem;
+    padding: 0.05rem 0.4rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    color: var(--accent);
+  }
+  .tree-items { list-style: none; margin: 0 0 0.2rem; padding: 0; }
+  .tree-item {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    border-radius: var(--radius-sm);
+    padding-left: 1.15rem;
+  }
+  .tree-item:hover { background: var(--hover); }
+  .tree-item.active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .tree-item.active .tree-name { color: var(--accent); }
+  .tree-name {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+    padding: 0.32rem 0.2rem;
     border: none;
     background: transparent;
-    color: inherit;
-    font: inherit;
+    color: var(--text);
+    font-size: 0.83rem;
+    font-family: inherit;
     cursor: pointer;
-    padding: 0;
-    max-width: 220px;
+    text-align: left;
+  }
+  .tree-name :global(svg) { color: var(--accent); flex-shrink: 0; }
+  .tree-name span {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .chip-name:hover { text-decoration: underline; }
-  .chip.removed { color: var(--text-dim); font-style: italic; }
-  .chip-x {
+  .tree-x {
     display: grid;
     place-items: center;
-    width: 18px;
-    height: 18px;
+    width: 20px;
+    height: 20px;
     border: none;
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
     cursor: pointer;
     padding: 0;
+    margin-right: 0.25rem;
+    opacity: 0;
+    flex-shrink: 0;
+    transition: opacity 0.12s;
   }
-  .chip-x:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
-  .chip.add {
-    border-style: dashed;
+  .tree-item:hover .tree-x { opacity: 1; }
+  .tree-x:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+  .tree-item.removed { padding: 0.3rem 0.2rem 0.3rem 1.15rem; }
+  .tree-removed { flex: 1; font-size: 0.8rem; font-style: italic; color: var(--text-dim); }
+  .tree-item.removed .tree-x { opacity: 1; }
+  .tree-add {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.35rem;
+    padding: 0.42rem 0.45rem;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-dim);
-    cursor: pointer;
+    font-size: 0.82rem;
     font-family: inherit;
+    cursor: pointer;
     transition: color 0.15s, border-color 0.15s;
   }
-  .chip.add:hover { color: var(--accent); border-color: var(--accent); }
-  .chip.add :global(svg) { color: inherit; }
+  .tree-add:hover { color: var(--accent); border-color: var(--accent); }
+
+  .canvas-image {
+    display: block;
+    width: 100%;
+    max-height: 60vh;
+    object-fit: contain;
+    background: #000;
+  }
+
+  .animate-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    padding: 0.9rem 1rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .animate-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+  }
+  .animate-head :global(svg) { color: var(--accent); }
+  .animate-box textarea {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.86rem;
+    resize: vertical;
+  }
+  .animate-box textarea:focus { outline: none; border-color: var(--accent); }
+  .animate-actions { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; }
+  .gen-hint { font-size: 0.74rem; color: var(--text-dim); margin: 0; }
+
+  .studio-actions { display: flex; gap: 0.5rem; }
+  .aspect-row { display: flex; gap: 0.4rem; }
+  .aspect-opt {
+    padding: 0.4rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: 0.84rem;
+    font-family: "JetBrains Mono", monospace;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .aspect-opt:hover { color: var(--text); }
+  .aspect-opt.on {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
 
   .picker {
-    margin-top: 0.7rem;
+    margin-top: 0.5rem;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: var(--surface);
-    box-shadow: var(--shadow);
-    padding: 0.7rem;
-    max-width: 480px;
+    background: var(--bg);
+    padding: 0.55rem;
   }
   .picker input {
     width: 100%;
@@ -1078,6 +1832,18 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .source-name-input {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.88rem;
+    font-family: inherit;
+    padding: 0.3rem 0.5rem;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+  }
+  .source-name-input:focus { outline: none; }
   .player {
     display: block;
     width: 100%;
@@ -1359,4 +2125,67 @@
   }
   .placeholder p, .empty-state p { margin: 0; }
   .placeholder .hint { font-size: 0.85rem; max-width: 440px; }
+
+  .edits-head { margin-top: 1.6rem; }
+  .section-gap { height: 1.6rem; }
+  .studio-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+    font-family: inherit;
+  }
+  .studio-toggle .chev {
+    display: inline-flex;
+    color: var(--text-dim);
+    transition: transform 0.15s;
+  }
+  .studio-toggle .chev.open { transform: rotate(180deg); }
+  .report-progress progress {
+    width: 160px;
+    height: 8px;
+    accent-color: var(--accent);
+  }
+
+  .edit-plan { padding: 0.9rem 1.2rem 1.2rem; }
+  .edit-plan h4 { margin: 0 0 0.5rem; font-size: 0.9rem; }
+  .edit-plan ol {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+  .clip-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.7rem;
+    width: 100%;
+    padding: 0.45rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s;
+  }
+  .clip-row:hover { border-color: var(--accent); }
+  .clip-range { color: var(--accent); font-size: 0.78rem; flex-shrink: 0; }
+  .clip-source {
+    font-weight: 600;
+    flex-shrink: 0;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .clip-reason { color: var(--text-dim); min-width: 0; }
 </style>

@@ -1,15 +1,19 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
-  import { FolderKanban, Plus, Trash2, FileText, Layers } from "lucide-svelte";
   import {
-    listProjects, createProject, deleteProject, type Project,
+    FolderKanban, Plus, Trash2, FileText, Layers, Search, Clapperboard,
+  } from "lucide-svelte";
+  import {
+    listProjects, createProject, deleteProject,
+    type Project, type ProjectFocus,
   } from "$lib/projects";
   import { toast } from "$lib/toast";
 
   let projects = $state<Project[]>([]);
   let creating = $state(false);
   let newName = $state("");
+  let newFocus = $state<ProjectFocus | undefined>(undefined);
   let confirmDeleteId = $state<string | null>(null);
   let nameInput = $state<HTMLInputElement | null>(null);
 
@@ -22,13 +26,14 @@
   function startCreate() {
     creating = true;
     newName = "";
+    newFocus = undefined;
     queueMicrotask(() => nameInput?.focus());
   }
 
   async function handleCreate() {
     const name = newName.trim();
     if (!name) return;
-    const project = await createProject(name);
+    const project = await createProject(name, "", newFocus);
     creating = false;
     goto(`/projects/${project.id}`);
   }
@@ -58,18 +63,39 @@
 </header>
 
 {#if creating}
-  <div class="create-row">
-    <input
-      bind:this={nameInput}
-      placeholder="Project name"
-      bind:value={newName}
-      onkeydown={(e) => {
-        if (e.key === "Enter") handleCreate();
-        if (e.key === "Escape") creating = false;
-      }}
-    />
-    <button class="btn primary" onclick={handleCreate} disabled={!newName.trim()}>Create</button>
-    <button class="btn" onclick={() => (creating = false)}>Cancel</button>
+  <div class="create-box">
+    <div class="create-row">
+      <input
+        bind:this={nameInput}
+        placeholder="Project name"
+        bind:value={newName}
+        onkeydown={(e) => {
+          if (e.key === "Enter") handleCreate();
+          if (e.key === "Escape") creating = false;
+        }}
+      />
+      <button class="btn primary" onclick={handleCreate} disabled={!newName.trim()}>Create</button>
+      <button class="btn" onclick={() => (creating = false)}>Cancel</button>
+    </div>
+    <div class="focus-row">
+      <span class="focus-label">What's this project mostly for? <span class="dim">(optional — just changes what's shown first)</span></span>
+      <div class="focus-opts">
+        <button
+          class="focus-opt"
+          class:on={newFocus === "research"}
+          onclick={() => (newFocus = newFocus === "research" ? undefined : "research")}
+        >
+          <Search size={14} /> Research &amp; reports
+        </button>
+        <button
+          class="focus-opt"
+          class:on={newFocus === "studio"}
+          onclick={() => (newFocus = newFocus === "studio" ? undefined : "studio")}
+        >
+          <Clapperboard size={14} /> Studio (edits &amp; generation)
+        </button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -146,7 +172,43 @@
   .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
 
-  .create-row { display: flex; gap: 0.6rem; margin-bottom: 1.25rem; max-width: 480px; }
+  .create-box {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+    margin-bottom: 1.25rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    max-width: 560px;
+  }
+  .focus-row { display: flex; flex-direction: column; gap: 0.45rem; }
+  .focus-label { font-size: 0.82rem; color: var(--text-dim); }
+  .focus-label .dim { opacity: 0.75; }
+  .focus-opts { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .focus-opt {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: 0.84rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .focus-opt:hover { color: var(--text); }
+  .focus-opt.on {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+  }
+
+  .create-row { display: flex; gap: 0.6rem; max-width: 480px; }
   .create-row input {
     flex: 1;
     padding: 0.6rem 0.7rem;

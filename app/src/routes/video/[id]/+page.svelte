@@ -15,11 +15,12 @@
 
   import {
     loadApiKey, loadPrompt, loadDiagramPrompt, loadGitHubToken,
-    loadMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
+    loadMaxToolTurns, loadVideoModel, DEFAULT_MAX_TOOL_TURNS,
   } from "$lib/settings";
   import {
     DEFAULT_MODEL, type Status, generateSummary, generateDiagram,
     generateChatReply, generateRepoChatReply, composePrompt,
+    generateVideoFromImage, videoModelInfo, DEFAULT_VIDEO_MODEL,
     type ChatMessage, type GeminiFile,
   } from "$lib/gemini";
   import {
@@ -29,7 +30,8 @@
   import {
     getVideo, ensureActiveFile, saveSummary, saveDiagram, saveHighlightMedia,
     deleteVideo, checkGeminiStatus, addTag, removeTag, saveCustomInstructions,
-    saveChat, isYouTube, isLoom, isGitHub, parseYouTubeId,
+    saveChat, isYouTube, isLoom, isGitHub, isImage, parseYouTubeId,
+    addGeneratedVideo, setThumbnail,
     type VideoRecord, type GeminiStatus, type Highlight,
   } from "$lib/videoLibrary";
   import ChatPanel from "$lib/ChatPanel.svelte";
@@ -38,8 +40,9 @@
   import { urlForToolCall, fileUrl, commitUrl, repoHomeUrl } from "$lib/researchView";
   import { captureFrame, sampleFrames } from "$lib/frames";
 
+  import { isMac } from "$lib/platform";
   import { mediaSrc, mediaAbsPath } from "$lib/media";
-  import { formatDuration } from "$lib/thumbnail";
+  import { formatDuration, probeVideo } from "$lib/thumbnail";
   import { toast } from "$lib/toast";
 
 
@@ -91,6 +94,7 @@
   const id = $derived($page.params.id ?? "");
   const isYt = $derived(record ? isYouTube(record) : false);
   const isRepo = $derived(record ? isGitHub(record) : false);
+  const isImg = $derived(record ? isImage(record) : false);
   const ytId = $derived(record?.sourceUrl ? parseYouTubeId(record.sourceUrl) : null);
   // Reactive start offset so "Jump" can reload the embed at a timestamp.
   let ytStart = $state<number | null>(null);
@@ -127,8 +131,22 @@
     apiKey = await loadApiKey();
     githubToken = await loadGitHubToken();
     maxToolTurns = await loadMaxToolTurns();
+    videoModel = await loadVideoModel();
     prompt = await loadPrompt();
     diagramPrompt = await loadDiagramPrompt();
+    await loadRecord();
+  });
+
+  // Same-route navigation (e.g. image → its generated clip) doesn't remount
+  // the component, so reload the record whenever the id param changes.
+  let loadedId = "";
+  $effect(() => {
+    if (loaded && id && id !== loadedId) void loadRecord();
+  });
+
+  async function loadRecord() {
+    loadedId = id;
+    loaded = false;
     record = await getVideo(id);
     customInstructions = record?.customInstructions ?? "";
     customDiagramInstructions = record?.customDiagramInstructions ?? "";
@@ -149,8 +167,17 @@
     if (record && !isYouTube(record) && !isGitHub(record) && record.highlights.some((h) => !h.mediaPath)) {
       await renderAllHighlights();
     }
+    // Heal local videos missing duration/thumbnail (e.g. generated clips
+    // saved before probing existed) — Auto-Edit needs a real durationSec.
+    if (record?.localPath && record.durationSec == null && !isImage(record) && !isGitHub(record) && !isYouTube(record)) {
+      const probe = await probeVideo(record.localPath);
+      if (probe.durationSec != null) {
+        await setThumbnail(record, probe.thumbnail, probe.durationSec);
+        record = await getVideo(id);
+      }
+    }
     await resolveMediaUrls();
-  });
+  }
 
   /** Resolve all disk-backed media paths into asset-protocol URLs for display. */
   async function resolveMediaUrls() {
@@ -367,6 +394,55 @@
     }
   }
 
+  // ── Animate (image → Veo video) ──
+  let animatePrompt = $state("");
+  let animating = $state(false);
+  let animateStatus = $state("");
+  let videoModel = $state(DEFAULT_VIDEO_MODEL);
+  const videoTier = $derived(videoModelInfo(videoModel));
+
+  /** Read the stored image and base64-encode it (chunked to avoid stack limits). */
+  async function imageAsBase64(path: string): Promise<string> {
+    const bytes = await readFile(path);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
+  }
+
+  async function handleAnimate() {
+    if (!record || animating || !animatePrompt.trim()) return;
+    if (!apiKey) {
+      toast.error("Set your Gemini API key in Settings first.");
+      return;
+    }
+    animating = true;
+    try {
+      const base64 = await imageAsBase64(record.localPath);
+      const result = await generateVideoFromImage(
+        apiKey, base64, record.mimeType, animatePrompt.trim(),
+        (label) => (animateStatus = label),
+        videoModel
+      );
+      const clip = await addGeneratedVideo(
+        `${record.videoName} (animated)`, result.bytes, animatePrompt.trim(), result.costUsd
+      );
+      // Probe the saved MP4 for duration + thumbnail — Auto-Edit validates
+      // plan timestamps against durationSec, so it must be real, not null.
+      const probe = await probeVideo(clip.localPath);
+      await setThumbnail(clip, probe.thumbnail, probe.durationSec);
+      toast.success("Video generated.");
+      await goto(`/video/${clip.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      animating = false;
+      animateStatus = "";
+    }
+  }
+
   let tagInput = $state("");
 
   async function handleAddTag() {
@@ -543,6 +619,8 @@
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen
       ></iframe>
+    {:else if isImg}
+      <img class="gen-image" src={videoSrc} alt={record.videoName} />
     {:else}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video bind:this={playerEl} src={videoSrc} controls preload="metadata"></video>
@@ -556,6 +634,12 @@
           <a class="yt-link" href={record.sourceUrl} target="_blank" rel="noreferrer">
             {record.sourceUrl}
           </a>
+        {:else if isImg}
+          <span>AI-generated image</span>
+          <span>· {record.mimeType}</span>
+          {#if record.customInstructions}
+            <span>· “{record.customInstructions}”</span>
+          {/if}
         {:else}
           <span>{fmtSize(record.sizeBytes)}</span>
           {#if formatDuration(record.durationSec)}<span>· {formatDuration(record.durationSec)}</span>{/if}
@@ -568,6 +652,8 @@
       </div>
       {#if isYt}
         <span class="badge gem-ok"><CircleCheck size={13} /> YouTube source</span>
+      {:else if isImg}
+        <span class="badge gem-ok"><Sparkles size={13} /> Generated with AI</span>
       {:else if gemStatus === "checking"}
         <span class="badge"><Cloud size={13} /> Checking Gemini…</span>
       {:else if gemStatus === "active"}
@@ -601,6 +687,35 @@
       </form>
     </div>
 
+    {#if isImg && isMac}
+      <div class="animate-box">
+        <div class="animate-head"><Film size={14} /> Animate this image</div>
+        <textarea
+          rows="2"
+          placeholder="Describe the motion, e.g. “The flamingo slowly wades forward as ripples spread”…"
+          bind:value={animatePrompt}
+          disabled={animating}
+        ></textarea>
+        <div class="actions">
+          <button
+            class="btn primary"
+            onclick={handleAnimate}
+            disabled={animating || !animatePrompt.trim() || !apiKey}
+          >
+            {#if animating}
+              <span class="mini-spin"></span> {animateStatus || "Working…"}
+            {:else}
+              <Sparkles size={15} /> Generate video
+            {/if}
+          </button>
+          <span class="dim small">
+            {videoTier.label} · ~8s clip · ~${videoTier.costPerClip.toFixed(2)} · takes 1-2 minutes
+          </span>
+        </div>
+      </div>
+    {/if}
+
+    {#if !isImg}
     {#if running}
       <div class="stepper" in:fade>
         {#each steps as step, i}
@@ -685,6 +800,7 @@
         <span class="dim small">Set your API key in Settings to summarize.</span>
       {/if}
     </div>
+    {/if}
   </section>
   {/if}
 
@@ -898,6 +1014,7 @@
   .player { padding: 0; overflow: hidden; }
   .player video { width: 100%; display: block; max-height: 420px; background: #000; }
   .yt-embed { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; border: none; }
+  .gen-image { width: 100%; display: block; max-height: 520px; object-fit: contain; background: #000; }
 
   .yt-link { color: var(--accent); text-decoration: none; word-break: break-all; }
   .yt-link:hover { text-decoration: underline; }
@@ -978,6 +1095,26 @@
   }
   .tag-add-btn:hover:not(:disabled) { background: var(--accent); color: #fff; border-color: var(--accent); }
   .tag-add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .animate-box { display: flex; flex-direction: column; gap: 0.6rem; }
+  .animate-head {
+    display: flex; align-items: center; gap: 0.4rem;
+    font-size: 0.9rem; font-weight: 600;
+  }
+  .animate-head :global(svg) { color: var(--accent); }
+  .animate-box textarea {
+    width: 100%;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 4px);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.88rem;
+    resize: vertical;
+    outline: none;
+  }
+  .animate-box textarea:focus { border-color: var(--accent); }
 
   .stepper { display: flex; align-items: center; margin: 0.5rem 0 1rem; }
   .step { display: flex; align-items: center; gap: 0.45rem; color: var(--text-dim); }

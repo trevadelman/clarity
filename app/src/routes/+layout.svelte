@@ -14,16 +14,14 @@
   import Toaster from "$lib/Toaster.svelte";
   import LinkTree from "$lib/LinkTree.svelte";
   import { chatDocked } from "$lib/chatDock";
-  import { browseEnabled, initBrowseEnabled } from "$lib/settings";
+  import { browseEnabled, initBrowseEnabled, initAutoEditEnabled } from "$lib/settings";
+  import { isMac } from "$lib/platform";
 
   let { children } = $props();
 
   // The frameless-overlay titlebar (tauri.conf.json `titleBarStyle: Overlay`)
   // is macOS-only; Windows keeps its native titlebar. So the CSS titlebar
   // strip — and the space everything reserves for it — only exists on macOS.
-  // Detected synchronously so there's no layout flash.
-  const isMac =
-    typeof navigator !== "undefined" && navigator.platform.startsWith("Mac");
   if (typeof document !== "undefined" && !isMac) {
     document.documentElement.style.setProperty("--titlebar-h", "0px");
   }
@@ -106,6 +104,7 @@
   onMount(async () => {
     initTheme();
     await initBrowseEnabled();
+    await initAutoEditEnabled();
     version = await getVersion();
     const info = await checkForUpdate();
     if (info && !(await isVersionDismissed(info.version))) update = info;

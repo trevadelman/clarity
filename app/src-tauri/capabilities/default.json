@@ -45,6 +45,10 @@
     {
       "identifier": "fs:allow-write-file",
       "allow": [{ "path": "**" }, { "path": "$APPDATA/**" }]
+    },
+    {
+      "identifier": "fs:allow-copy-file",
+      "allow": [{ "path": "**" }, { "path": "$APPDATA/**" }]
     }
   ]
 }

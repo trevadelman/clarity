@@ -49,7 +49,7 @@ export interface Highlight {
 
 
 
-export type SourceType = "local" | "youtube" | "loom" | "github";
+export type SourceType = "local" | "youtube" | "loom" | "github" | "image";
 
 /** A saved AI digest of a set of commits. */
 export interface RepoDigest {
@@ -279,6 +279,106 @@ export function isLoom(record: VideoRecord): boolean {
 /** True if the record tracks a GitHub repository. */
 export function isGitHub(record: VideoRecord): boolean {
   return record.sourceType === "github";
+}
+
+/** True if the record is an AI-generated still image. */
+export function isImage(record: VideoRecord): boolean {
+  return record.sourceType === "image";
+}
+
+/**
+ * Save an AI-generated image (PNG data URL) as a library record. The image
+ * doubles as its own thumbnail; `localPath` points at the stored PNG so the
+ * record can later feed image-to-video generation.
+ */
+export async function addGeneratedImage(
+  name: string,
+  imageDataUrl: string,
+  prompt: string,
+  costUsd: number
+): Promise<VideoRecord> {
+  const id = crypto.randomUUID();
+  const relPath = await saveMedia(id, "generated.png", imageDataUrl);
+  const localPath = await join(await appDataDir(), ...relPath.split("/"));
+
+  const record: VideoRecord = {
+    id,
+    videoName: name.trim() || "Generated image",
+    sourceType: "image",
+    sourceUrl: null,
+    localPath,
+    mimeType: "image/png",
+    sizeBytes: 0,
+    addedAt: new Date().toISOString(),
+    thumbnailPath: relPath,
+    durationSec: null,
+    tags: [],
+    customInstructions: prompt,
+    customDiagramInstructions: null,
+    geminiName: null,
+    geminiUri: null,
+    summary: null,
+    summaryPrompt: null,
+    summaryModel: null,
+    summarizedAt: null,
+    summaryInputTokens: null,
+    summaryOutputTokens: null,
+    summaryCostUsd: costUsd,
+    diagramPath: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
+  };
+  await upsert(record);
+  return record;
+}
+
+/**
+ * Save a Veo-generated MP4 as a normal local video record — instantly
+ * usable everywhere (player, Gemini upload, screenshots, Auto-Edit).
+ */
+export async function addGeneratedVideo(
+  name: string,
+  bytes: Uint8Array,
+  motionPrompt: string,
+  costUsd: number
+): Promise<VideoRecord> {
+  const dir = await join(await appDataDir(), VIDEO_DIR);
+  if (!(await exists(dir))) await mkdir(dir, { recursive: true });
+  const id = crypto.randomUUID();
+  const localPath = await join(dir, `${id}.mp4`);
+  await writeFile(localPath, bytes);
+
+  const record: VideoRecord = {
+    id,
+    videoName: name.trim() || "Generated video",
+    sourceType: "local",
+    sourceUrl: null,
+    localPath,
+    mimeType: "video/mp4",
+    sizeBytes: bytes.length,
+    addedAt: new Date().toISOString(),
+    thumbnailPath: null,
+    durationSec: null,
+    tags: ["generated"],
+    customInstructions: motionPrompt,
+    customDiagramInstructions: null,
+    geminiName: null,
+    geminiUri: null,
+    summary: null,
+    summaryPrompt: null,
+    summaryModel: null,
+    summarizedAt: null,
+    summaryInputTokens: null,
+    summaryOutputTokens: null,
+    summaryCostUsd: costUsd,
+    diagramPath: null,
+    diagramGeneratedAt: null,
+    diagramCostUsd: null,
+    highlights: [],
+  };
+  await upsert(record);
+  return record;
 }
 
 /** Add a GitHub repo by URL: fetch metadata and create an activity record. */

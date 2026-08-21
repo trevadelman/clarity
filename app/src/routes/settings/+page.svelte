@@ -4,7 +4,7 @@
   import {
     KeyRound, MessageSquareText, ImageIcon, Save, RotateCcw, RefreshCw,
     GitBranch, DollarSign, Trash2, Wrench, Globe, Settings2,
-    Sparkles, Link2, ChevronDown,
+    Sparkles, Link2, ChevronDown, Clapperboard,
   } from "lucide-svelte";
   import { invoke } from "@tauri-apps/api/core";
   import {
@@ -13,8 +13,11 @@
     loadGitHubToken, saveGitHubToken,
     loadMaxToolTurns, saveMaxToolTurns, DEFAULT_MAX_TOOL_TURNS,
     browseEnabled, saveBrowseEnabled,
+    autoEditEnabled, saveAutoEditEnabled,
+    loadVideoModel, saveVideoModel,
   } from "$lib/settings";
-  import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT } from "$lib/gemini";
+  import { isMac } from "$lib/platform";
+  import { DEFAULT_PROMPT, DEFAULT_DIAGRAM_PROMPT, VIDEO_MODELS, DEFAULT_VIDEO_MODEL } from "$lib/gemini";
   import { loadSpend, resetSpend, type SpendInfo } from "$lib/spend";
   import { checkForUpdate, installUpdate } from "$lib/updates";
   import { toast } from "$lib/toast";
@@ -36,6 +39,7 @@
   let checking = $state(false);
   let spend = $state<SpendInfo>({ totalUsd: 0, since: null });
   let maxToolTurns = $state(DEFAULT_MAX_TOOL_TURNS);
+  let videoModel = $state(DEFAULT_VIDEO_MODEL);
   let confirmClear = $state(false);
   let clearing = $state(false);
   let summaryPromptOpen = $state(true);
@@ -49,7 +53,14 @@
     version = await getVersion();
     spend = await loadSpend();
     maxToolTurns = await loadMaxToolTurns();
+    videoModel = await loadVideoModel();
   });
+
+  async function handlePickVideoModel(id: string) {
+    videoModel = id;
+    await saveVideoModel(id);
+    toast.success("Video model saved.");
+  }
 
   async function handleSaveMaxToolTurns() {
     maxToolTurns = Math.max(1, Math.min(25, Math.round(maxToolTurns) || DEFAULT_MAX_TOOL_TURNS));
@@ -100,6 +111,11 @@
   function handleReset() {
     prompt = DEFAULT_PROMPT;
     toast.info("Prompt reset to default (not yet saved).");
+  }
+  async function handleToggleAutoEdit() {
+    const enabled = !$autoEditEnabled;
+    await saveAutoEditEnabled(enabled);
+    toast.success(enabled ? "Auto-Edit enabled." : "Auto-Edit disabled.");
   }
   async function handleToggleBrowse() {
     const enabled = !$browseEnabled;
@@ -234,6 +250,50 @@
       </div>
       <p class="hint">Controls the conceptual learning diagram. Designed to avoid recreating screenshots or OS chrome (docks, menu bars) — those belong in Highlights. The model may still reference the video to match a demonstrated UI component's aesthetic.</p>
     {/if}
+  </section>
+
+  {#if isMac}
+  <section class="card">
+    <div class="card-head"><Clapperboard size={17} /><h2>Video Generation</h2></div>
+    <div class="model-opts">
+      {#each VIDEO_MODELS as m (m.id)}
+        <button
+          class="model-opt"
+          class:on={videoModel === m.id}
+          onclick={() => handlePickVideoModel(m.id)}
+        >
+          <span class="model-name">{m.label}</span>
+          <span class="model-hint">{m.hint}</span>
+          <span class="model-cost mono">~${m.costPerClip.toFixed(2)} / 8s clip</span>
+        </button>
+      {/each}
+    </div>
+    <p class="hint">
+      Veo tier used when animating an image into a video clip. Lite is the
+      default and cheapest; upgrade for higher quality when a clip matters.
+    </p>
+  </section>
+  {/if}
+
+  <section class="card">
+    <div class="card-head"><Clapperboard size={17} /><h2>Auto-Edit</h2></div>
+    <div class="row">
+      <span class="version">Auto-Edit (beta)</span>
+      {#if isMac}
+        <button class="btn" class:primary={!$autoEditEnabled} onclick={handleToggleAutoEdit}>
+          {$autoEditEnabled ? "Disable" : "Enable"}
+        </button>
+      {:else}
+        <button class="btn" disabled title="Auto-Edit requires macOS">macOS only</button>
+      {/if}
+    </div>
+    <p class="hint">
+      Adds an Edits section to Projects: pick local videos, describe the cut
+      you want, optionally add a music track — Gemini plans the edit and
+      Clarity renders a finished MP4 on-device. Opt-in while in beta.
+      {#if !isMac}Rendering uses macOS system frameworks, so this feature is
+      unavailable on this platform.{/if}
+    </p>
   </section>
 {/if}
 
@@ -487,4 +547,33 @@
     flex: 1;
   }
   .sub-label :global(svg) { color: var(--accent); }
+
+  .model-opts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 0.6rem;
+  }
+  .model-opt {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg);
+    color: var(--text);
+    font-family: inherit;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .model-opt:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+  .model-opt.on {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  }
+  .model-name { font-size: 0.9rem; font-weight: 600; }
+  .model-opt.on .model-name { color: var(--accent); }
+  .model-hint { font-size: 0.76rem; color: var(--text-dim); }
+  .model-cost { font-size: 0.72rem; color: var(--text-dim); }
 </style>

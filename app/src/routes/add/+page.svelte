@@ -4,14 +4,17 @@
   import { goto } from "$app/navigation";
   import { open } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { UploadCloud, Film, Link } from "lucide-svelte";
+  import { UploadCloud, Film, Link, Sparkles } from "lucide-svelte";
   import {
     addVideo, addYouTubeVideo, addLoomVideo, addGitHubRepo,
-    parseYouTubeId, parseLoomId, setThumbnail,
+    parseYouTubeId, parseLoomId, setThumbnail, addGeneratedImage,
   } from "$lib/videoLibrary";
   import { parseGitHubRepo } from "$lib/github";
   import { probeVideo } from "$lib/thumbnail";
-  import { loadGitHubToken } from "$lib/settings";
+  import { loadGitHubToken, loadApiKey } from "$lib/settings";
+  import {
+    generateImage, IMAGE_COST_PER_IMAGE, type ImageAspect,
+  } from "$lib/gemini";
   import { toast } from "$lib/toast";
 
   const VIDEO_EXTS = ["mp4", "mov", "webm"];
@@ -22,6 +25,17 @@
   let ytUrl = $state("");
   let ytBusy = $state(false);
   let ytStage = $state("");
+
+  // ── Generate with AI ────────────────────────────────────────────────
+  let apiKey = $state("");
+  let genPrompt = $state("");
+  let genAspect = $state<ImageAspect>("1:1");
+  let genBusy = $state(false);
+  const ASPECTS: { value: ImageAspect; label: string }[] = [
+    { value: "1:1", label: "Square (1:1)" },
+    { value: "9:16", label: "Story (9:16)" },
+    { value: "16:9", label: "Wide (16:9)" },
+  ];
 
   const linkKind = $derived(
     parseYouTubeId(ytUrl)
@@ -37,6 +51,7 @@
   let unlistenDrop: (() => void) | null = null;
 
   onMount(async () => {
+    apiKey = await loadApiKey();
     const webview = getCurrentWebview();
     unlistenDrop = await webview.onDragDropEvent((event) => {
       if (event.payload.type === "over") {
@@ -108,6 +123,22 @@
     }
   }
 
+  async function handleGenerateImage() {
+    const prompt = genPrompt.trim();
+    if (!prompt || genBusy || !apiKey) return;
+    genBusy = true;
+    try {
+      const result = await generateImage(apiKey, prompt, genAspect);
+      const name = prompt.length > 60 ? `${prompt.slice(0, 57)}…` : prompt;
+      const record = await addGeneratedImage(name, result.image, prompt, result.costUsd);
+      toast.success("Image generated and added to your library.");
+      await goto(`/video/${record.id}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err));
+      genBusy = false;
+    }
+  }
+
   async function handleChoose() {
     const selected = await open({
       multiple: false,
@@ -159,6 +190,43 @@
 {#if ytUrl.trim() && !ytValid}
   <p class="yt-hint">Enter a full YouTube, Loom, or GitHub URL, e.g. https://www.youtube.com/watch?v=… or https://github.com/owner/repo</p>
 {/if}
+
+<div class="or-divider"><span>or</span></div>
+
+<form class="gen-card" onsubmit={(e) => { e.preventDefault(); handleGenerateImage(); }}>
+  <div class="gen-head">
+    <span class="gen-icon"><Sparkles size={16} /></span>
+    <span class="gen-title">Generate an image with AI</span>
+    <span class="gen-cost mono">~${IMAGE_COST_PER_IMAGE.toFixed(2)} / image</span>
+  </div>
+  <textarea
+    rows="2"
+    placeholder="Describe the image, e.g. “a pink flamingo standing in turquoise water, golden hour”"
+    bind:value={genPrompt}
+    disabled={genBusy}
+  ></textarea>
+  <div class="gen-row">
+    <div class="aspects">
+      {#each ASPECTS as a (a.value)}
+        <button
+          type="button"
+          class="aspect"
+          class:active={genAspect === a.value}
+          onclick={() => (genAspect = a.value)}
+          disabled={genBusy}
+        >
+          {a.label}
+        </button>
+      {/each}
+    </div>
+    <button type="submit" class="yt-btn" disabled={!genPrompt.trim() || genBusy || !apiKey}>
+      {#if genBusy}<span class="mini-spin"></span> Generating…{:else}Generate{/if}
+    </button>
+  </div>
+  {#if !apiKey}
+    <p class="yt-hint">Add your Gemini API key in Settings to generate images.</p>
+  {/if}
+</form>
 
 <div class="info" in:fade>
   <Film size={16} />
@@ -273,6 +341,47 @@
   .yt-btn:hover:not(:disabled) { background: var(--accent-hover); }
   .yt-btn:disabled { opacity: 0.45; cursor: not-allowed; }
   .yt-hint { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--text-dim); }
+
+  .gen-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    transition: border-color 0.15s;
+  }
+  .gen-card:focus-within { border-color: var(--accent); }
+  .gen-head { display: flex; align-items: center; gap: 0.5rem; }
+  .gen-icon { color: var(--accent); display: inline-flex; }
+  .gen-title { font-weight: 600; font-size: 0.92rem; }
+  .gen-cost { margin-left: auto; font-size: 0.75rem; color: var(--text-dim); }
+  .gen-card textarea {
+    width: 100%;
+    resize: vertical;
+    border: none;
+    background: transparent;
+    color: var(--text);
+    font-size: 0.92rem;
+    font-family: inherit;
+    outline: none;
+  }
+  .gen-row { display: flex; align-items: center; gap: 0.6rem; }
+  .aspects { display: flex; gap: 0.4rem; flex: 1; }
+  .aspect {
+    padding: 0.35rem 0.7rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .aspect:hover:not(:disabled) { border-color: var(--accent); }
+  .aspect.active { border-color: var(--accent); color: var(--accent); }
 
   .mini-spin {
     width: 13px;

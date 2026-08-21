@@ -373,6 +373,164 @@ export async function generateDiagram(
   throw new Error("No diagram image returned from Gemini.");
 }
 
+/** Aspect-ratio presets for standalone image generation. */
+export type ImageAspect = "1:1" | "9:16" | "16:9";
+
+/**
+ * Generate a standalone image from a free-form prompt (Studio flow).
+ * Same image model and flat pricing as diagram generation.
+ */
+export async function generateImage(
+  apiKey: string,
+  prompt: string,
+  aspect: ImageAspect
+): Promise<DiagramResult> {
+  const ai = client(apiKey);
+  const response = await ai.models.generateContent({
+    model: IMAGE_MODEL,
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: `${prompt}\n\nAspect ratio: ${aspect}. Output only the image.` }],
+      },
+    ],
+    config: { imageConfig: { aspectRatio: aspect } },
+  });
+
+  const parts = response.candidates?.[0]?.content?.parts ?? [];
+  for (const part of parts) {
+    const data = part.inlineData?.data;
+    if (data) {
+      const mime = part.inlineData?.mimeType ?? "image/png";
+      void trackSpend(IMAGE_COST_PER_IMAGE);
+      return { image: `data:${mime};base64,${data}`, costUsd: IMAGE_COST_PER_IMAGE };
+    }
+  }
+  throw new Error("No image returned from Gemini.");
+}
+
+// ── Veo image-to-video generation ─────────────────────────────────────
+
+/**
+ * Veo image-to-video model tiers. Clips are always ~8 seconds; the poll
+ * response carries no usage metadata, so spend tracking uses the published
+ * per-second 720p rates × 8.
+ */
+export interface VideoModelInfo {
+  id: string;
+  label: string;
+  /** Short quality/cost description for pickers. */
+  hint: string;
+  costPerClip: number;
+}
+
+export const VIDEO_MODELS: VideoModelInfo[] = [
+  {
+    id: "veo-3.1-lite-generate-preview",
+    label: "Veo 3.1 Lite",
+    hint: "cheapest — good for drafts",
+    costPerClip: 0.05 * 8,
+  },
+  {
+    id: "veo-3.1-fast-generate-preview",
+    label: "Veo 3.1 Fast",
+    hint: "better quality, quick",
+    costPerClip: 0.10 * 8,
+  },
+  {
+    id: "veo-3.1-generate-preview",
+    label: "Veo 3.1",
+    hint: "highest quality",
+    costPerClip: 0.40 * 8,
+  },
+];
+
+/** Default video model (cheapest tier). */
+export const DEFAULT_VIDEO_MODEL = VIDEO_MODELS[0].id;
+
+export function videoModelInfo(id: string): VideoModelInfo {
+  return VIDEO_MODELS.find((m) => m.id === id) ?? VIDEO_MODELS[0];
+}
+
+/** Cost of one clip on the default (lite) model. */
+export const VIDEO_COST_PER_CLIP = VIDEO_MODELS[0].costPerClip;
+
+const GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta";
+
+export interface VideoGenResult {
+  /** Raw MP4 bytes, ready to write into the library. */
+  bytes: Uint8Array;
+  costUsd: number;
+}
+
+/**
+ * Animate a still image into an ~8s video clip with Veo (image-to-video).
+ * Starts a long-running operation, polls until done, and downloads the MP4.
+ * Confirmed via spike: inline base64 image conditioning, ~40-90s wall time.
+ */
+export async function generateVideoFromImage(
+  apiKey: string,
+  imageBase64: string,
+  imageMimeType: string,
+  motionPrompt: string,
+  onStatus?: (label: string) => void,
+  model: string = DEFAULT_VIDEO_MODEL
+): Promise<VideoGenResult> {
+  onStatus?.("Starting video generation…");
+  const startRes = await fetch(
+    `${GEMINI_REST_BASE}/models/${model}:predictLongRunning?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        instances: [
+          {
+            prompt: motionPrompt,
+            image: { bytesBase64Encoded: imageBase64, mimeType: imageMimeType },
+          },
+        ],
+      }),
+    }
+  );
+  if (!startRes.ok) {
+    throw new Error(`Video generation failed to start (${startRes.status}): ${await startRes.text()}`);
+  }
+  const op = (await startRes.json()) as { name: string };
+
+  const started = Date.now();
+  let uri: string | null = null;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 5000));
+    const elapsed = Math.round((Date.now() - started) / 1000);
+    onStatus?.(`Generating video… ${elapsed}s`);
+    const pollRes = await fetch(`${GEMINI_REST_BASE}/${op.name}?key=${apiKey}`);
+    const poll = (await pollRes.json()) as {
+      done?: boolean;
+      error?: { message?: string };
+      response?: {
+        generateVideoResponse?: {
+          generatedSamples?: { video?: { uri?: string } }[];
+        };
+      };
+    };
+    if (poll.error) throw new Error(poll.error.message ?? "Video generation failed.");
+    if (poll.done) {
+      uri = poll.response?.generateVideoResponse?.generatedSamples?.[0]?.video?.uri ?? null;
+      break;
+    }
+    if (elapsed > 600) throw new Error("Video generation timed out after 10 minutes.");
+  }
+  if (!uri) throw new Error("Video generation finished but returned no video.");
+
+  onStatus?.("Downloading video…");
+  const dl = await fetch(uri.includes("key=") ? uri : `${uri}&key=${apiKey}`);
+  if (!dl.ok) throw new Error(`Downloading the generated video failed (${dl.status}).`);
+  const bytes = new Uint8Array(await dl.arrayBuffer());
+  const costUsd = videoModelInfo(model).costPerClip;
+  void trackSpend(costUsd);
+  return { bytes, costUsd };
+}
+
 /** A report the model has proposed mid-chat, awaiting user approval. */
 export interface ReportProposal {
   title: string;
@@ -1133,6 +1291,143 @@ function describePageToolCall(name: string, args: Record<string, unknown> = {}):
     case "get_page_links": return "Scanning page links…";
     default: return `Running ${name}…`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-Edit plan generation
+// ---------------------------------------------------------------------------
+
+/** Default instructions for the Auto-Edit modal (editable by the user). */
+export const DEFAULT_EDIT_PROMPT =
+  "Watch each video and pick the best moments — the clearest action, the " +
+  "biggest smiles, the most memorable beats. Choose one or two short " +
+  "segments (roughly 3-6 seconds each) per video and splice them together " +
+  "into a highlight reel that flows well from clip to clip.";
+
+const EDIT_PLAN_SYSTEM_PROMPT =
+  "You are a video editor creating an edit plan by watching the attached " +
+  "source videos. Select time ranges from the sources and order them into " +
+  "a timeline per the user's instructions.\n\n" +
+  "Rules:\n" +
+  "- Only reference the attached videos by their exact videoId.\n" +
+  "- Every clip's startSec/endSec must lie within that video's stated " +
+  "duration; never guess beyond it.\n" +
+  "- Prefer clean in/out points (start of an action, end of a phrase).\n" +
+  "- Keep the total length appropriate to the instructions.\n" +
+  "- Give each clip a short reason explaining why that moment was chosen.";
+
+/** A video eligible as an Auto-Edit source. */
+export interface EditSourceVideo {
+  id: string;
+  name: string;
+  durationSec: number;
+  file: GeminiFile;
+}
+
+export interface EditPlanResult {
+  title: string;
+  clips: { videoId: string; startSec: number; endSec: number; reason: string }[];
+  usage: TokenUsage;
+}
+
+function editPlanSchema(videoIds: string[]): object {
+  return {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "Short title for the edit." },
+      clips: {
+        type: "array",
+        description: "The timeline, in playback order.",
+        items: {
+          type: "object",
+          properties: {
+            videoId: { type: "string", enum: videoIds },
+            startSec: { type: "number" },
+            endSec: { type: "number" },
+            reason: {
+              type: "string",
+              description: "Why this moment was chosen (one sentence).",
+            },
+          },
+          required: ["videoId", "startSec", "endSec", "reason"],
+        },
+      },
+    },
+    required: ["title", "clips"],
+  };
+}
+
+/** Reject invalid plans outright — never silently clamp Gemini's output. */
+function validateEditPlan(
+  parsed: { title?: string; clips?: EditPlanResult["clips"] },
+  videos: EditSourceVideo[]
+): asserts parsed is { title: string; clips: EditPlanResult["clips"] } {
+  if (!parsed.title?.trim()) throw new Error("Edit plan is missing a title.");
+  if (!Array.isArray(parsed.clips) || parsed.clips.length === 0)
+    throw new Error("Edit plan has no clips.");
+  const byId = new Map(videos.map((v) => [v.id, v]));
+  for (const clip of parsed.clips) {
+    const video = byId.get(clip.videoId);
+    if (!video) throw new Error(`Edit plan references unknown video: ${clip.videoId}`);
+    if (
+      typeof clip.startSec !== "number" ||
+      typeof clip.endSec !== "number" ||
+      clip.startSec < 0 ||
+      clip.endSec <= clip.startSec ||
+      clip.endSec > video.durationSec + 0.5
+    ) {
+      throw new Error(
+        `Edit plan has an out-of-range clip (${clip.startSec}-${clip.endSec}s) ` +
+          `for "${video.name}" (${video.durationSec}s long).`
+      );
+    }
+  }
+}
+
+/**
+ * Watch the attached videos and produce a validated edit plan: which time
+ * ranges from which videos, in what order. Rendering happens natively —
+ * this call only plans.
+ */
+export async function generateEditPlan(
+  apiKey: string,
+  instructions: string,
+  videos: EditSourceVideo[],
+  model: ModelId = DEFAULT_MODEL
+): Promise<EditPlanResult> {
+  if (videos.length === 0) throw new Error("No source videos provided.");
+  const ai = client(apiKey);
+
+  const parts: object[] = [];
+  for (const v of videos) {
+    const fileData = v.file.mimeType
+      ? { fileUri: v.file.uri, mimeType: v.file.mimeType }
+      : { fileUri: v.file.uri };
+    parts.push({ fileData });
+    parts.push({
+      text:
+        `The media above is video "${v.name}" (videoId: ${v.id}, ` +
+        `duration: ${v.durationSec.toFixed(1)} seconds).`,
+    });
+  }
+  parts.push({ text: `Edit instructions:\n${instructions}` });
+
+  const response = await ai.models.generateContent({
+    model,
+    config: {
+      systemInstruction: EDIT_PLAN_SYSTEM_PROMPT,
+      responseMimeType: "application/json",
+      responseSchema: editPlanSchema(videos.map((v) => v.id)),
+    },
+    contents: [{ role: "user", parts }],
+  });
+
+  const raw = response.text;
+  if (!raw) throw new Error("No edit plan returned from Gemini.");
+  const parsed = JSON.parse(raw) as { title?: string; clips?: EditPlanResult["clips"] };
+  validateEditPlan(parsed, videos);
+
+  return { title: parsed.title, clips: parsed.clips, usage: usageFromResponse(model, response) };
 }
 
 /** Delete a file from the Gemini File API. */
